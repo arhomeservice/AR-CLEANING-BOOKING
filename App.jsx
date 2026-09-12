@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from "react";
+import * as XLSX from "xlsx";
 
 /* ============================================================
    AR Cleaning — Dispatch prototype (mock data, no backend)
@@ -211,6 +212,18 @@ input::placeholder,textarea::placeholder{color:#9aa8a2}
 .sheet-legend{margin-top:12px;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .sheet-legend .ld{width:10px;height:10px;border-radius:50%;display:inline-block}
 .sheet-legend .ld.ok{background:var(--go)}.sheet-legend .ld.tight{background:var(--tight)}.sheet-legend .ld.conflict{background:var(--conflict)}
+.board-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.btn-x{font-family:var(--body);font-weight:600;font-size:13px;padding:9px 14px;border-radius:9px;border:1.5px solid var(--go);background:var(--surface);color:var(--go);cursor:pointer;transition:all .12s}
+.btn-x:hover{background:var(--go-soft)}
+.btn-x:disabled{border-color:var(--line);color:#9aa8a2;cursor:not-allowed;background:var(--surface)}
+.cell.clickable{cursor:pointer;transition:background .1s}
+.cell.clickable:hover{background:var(--line-2)}
+.cell.clickable.cell-new:hover{background:#d6ecdf}
+.drv-pin{flex:0 0 auto;align-self:center;font-family:var(--disp);font-weight:600;font-size:12.5px;text-decoration:none;color:var(--blue);background:var(--blue-soft);border-radius:8px;padding:8px 12px;white-space:nowrap}
+.drv-pin:hover{filter:brightness(.96)}
+.edit-actions{display:flex;gap:10px;margin-top:18px}
+.edit-actions .del{flex:0 0 auto;background:var(--conflict-soft);color:var(--conflict);border:none;font-weight:600;font-family:var(--body);font-size:14px;padding:12px 14px;border-radius:10px;cursor:pointer}
+.edit-actions .grow{flex:1}
 `;
 
 /* ---------------- mock data ---------------- */
@@ -345,18 +358,44 @@ function evaluateCleaners({time,area,clientPhone}, bookings, date){
 /* build grouped driver runs for a date */
 function buildDriverRuns(bookings,date){
   const evs=[];
+  const gpsOf=(b)=>b.gps||(AREA_COORDS[b.area]?{lat:AREA_COORDS[b.area][0],lng:AREA_COORDS[b.area][1]}:null);
   bookings.filter(b=>b.date===date).forEach(b=>{
-    evs.push({type:"DROP",min:b.time.startMin-30,area:b.area,building:b.building,cleaner:b.cleanerName});
-    evs.push({type:"COLLECT",min:b.time.endMin,area:b.area,building:b.building,cleaner:b.cleanerName});
+    evs.push({type:"DROP",min:b.time.startMin-30,area:b.area,building:b.building,cleaner:b.cleanerName,gps:gpsOf(b)});
+    evs.push({type:"COLLECT",min:b.time.endMin,area:b.area,building:b.building,cleaner:b.cleanerName,gps:gpsOf(b)});
   });
   evs.sort((a,b)=>a.min-b.min||(a.type<b.type?-1:1));
   const runs=[];
   evs.forEach(e=>{
     const g=runs.find(r=>r.type===e.type&&r.area===e.area&&Math.abs(e.min-r.min)<=20);
     if(g){g.cleaners.push(e.cleaner); if(e.building&&!g.buildings.includes(e.building))g.buildings.push(e.building);}
-    else runs.push({type:e.type,min:e.min,area:e.area,cleaners:[e.cleaner],buildings:e.building?[e.building]:[]});
+    else runs.push({type:e.type,min:e.min,area:e.area,cleaners:[e.cleaner],buildings:e.building?[e.building]:[],gps:e.gps});
   });
   return runs.sort((a,b)=>a.min-b.min);
+}
+const mapsLink=(gps)=>gps?`https://www.google.com/maps/search/?api=1&query=${gps.lat},${gps.lng}`:"";
+
+/* ---------------- Excel export ---------------- */
+function exportDeployment(dayBookings,date){
+  const rows=dayBookings.slice()
+    .sort((a,b)=>a.cleanerName.localeCompare(b.cleanerName)||a.time.startMin-b.time.startMin)
+    .map(b=>({Cleaner:b.cleanerName, Client:b.clientName, Building:b.building||"", "Apt/Villa":b.apt||"",
+      Area:b.area, Start:b.time.start, End:b.time.end, Duration:fmtDur(b.time.minutes),
+      Materials:b.materials?"W/m":"", Price:b.price??"", Code:b.code||"", Notes:b.notes||"",
+      "Map link":mapsLink(b.gps)}));
+  const ws=XLSX.utils.json_to_sheet(rows);
+  rows.forEach((r,i)=>{ if(r["Map link"]){ const a=XLSX.utils.encode_cell({c:12,r:i+1}); if(ws[a]) ws[a].l={Target:r["Map link"],Tooltip:"Open in Maps"}; }});
+  ws["!cols"]=[{wch:10},{wch:20},{wch:20},{wch:9},{wch:14},{wch:7},{wch:7},{wch:8},{wch:9},{wch:8},{wch:6},{wch:24},{wch:16}];
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Deployment");
+  XLSX.writeFile(wb,`Deployment_${date}.xlsx`);
+}
+function exportDriver(runs,date){
+  const rows=runs.map(r=>({Time:minToStr(r.min), Type:r.type, Cleaners:r.cleaners.join(" + "),
+    Location:r.buildings.length?r.buildings.join(" / "):r.area, Area:r.area, "Map link":mapsLink(r.gps)}));
+  const ws=XLSX.utils.json_to_sheet(rows);
+  rows.forEach((r,i)=>{ if(r["Map link"]){ const a=XLSX.utils.encode_cell({c:5,r:i+1}); if(ws[a]) ws[a].l={Target:r["Map link"],Tooltip:"Open in Maps"}; }});
+  ws["!cols"]=[{wch:8},{wch:9},{wch:22},{wch:26},{wch:14},{wch:16}];
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Driver schedule");
+  XLSX.writeFile(wb,`Driver_${date}.xlsx`);
 }
 
 /* seed the shared bookings from cleaner base schedules */
@@ -366,6 +405,7 @@ function seedBookings(){
     id:`seed-${cl.id}-${i}`, clientName:b.client, phone:"", date:TODAY,
     time:{start:b.start,end:b.end,startMin:toMin(b.start),endMin:toMin(b.end),minutes:toMin(b.end)-toMin(b.start)},
     area:b.area, building:"", apt:"", materials:false, price:null, notes:"",
+    gps:AREA_COORDS[b.area]?{lat:AREA_COORDS[b.area][0],lng:AREA_COORDS[b.area][1]}:null,
     cleanerId:cl.id, cleanerName:cl.name, mode:"AUTO", code:"O", seed:true,
   })));
   return out;
@@ -387,6 +427,8 @@ export default function App(){
     setView("deployment");
     window.scrollTo({top:0,behavior:"smooth"});
   }
+  function updateBooking(id,changes){ setBookings(prev=>prev.map(b=>b.id===id?{...b,...changes}:b)); }
+  function deleteBooking(id){ setBookings(prev=>prev.filter(b=>b.id!==id)); }
 
   return(
     <div className="ar-root">
@@ -423,7 +465,7 @@ export default function App(){
       {view==="new" &&
         <BookingForm bookings={bookings} onSave={handleSave}/>}
       {view==="deployment" &&
-        <DeploymentView bookings={bookings} date={boardDate} setDate={d=>{setBoardDate(d);setHighlight(null);}} highlight={highlight}/>}
+        <DeploymentView bookings={bookings} date={boardDate} setDate={d=>{setBoardDate(d);setHighlight(null);}} highlight={highlight} onUpdate={updateBooking} onDelete={deleteBooking}/>}
       {view==="driver" &&
         <DriverView bookings={bookings} date={boardDate} setDate={setBoardDate}/>}
     </div>
@@ -671,7 +713,8 @@ function BookingForm({bookings,onSave}){
 function compactTime(t){ let [h,m]=t.split(":"); h=String(parseInt(h,10)); return m==="00"?h:`${h}:${m}`; }
 function fmtSheetDate(date){ try{ return new Date(date+"T00:00:00").toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"short",year:"numeric"}); }catch(e){ return date; } }
 
-function DeploymentView({bookings,date,setDate,highlight}){
+function DeploymentView({bookings,date,setDate,highlight,onUpdate,onDelete}){
+  const [editing,setEditing]=useState(null);
   const dayBookings=bookings.filter(b=>b.date===date);
   const lanes=CLEANERS.map(cl=>({cl,jobs:dayBookings.filter(b=>b.cleanerId===cl.id).sort((a,b)=>a.time.startMin-b.time.startMin)}));
   const active=lanes.filter(l=>l.jobs.length>0);
@@ -682,9 +725,12 @@ function DeploymentView({bookings,date,setDate,highlight}){
     <div className="board">
       <div className="board-hd">
         <div><h2>Deployment board</h2>
-          <div className="stat">{dayBookings.length} booking{dayBookings.length!==1?"s":""} · {deployed} cleaner{deployed!==1?"s":""} deployed</div></div>
-        <div className="date-pick"><span className="lab" style={{margin:0}}>Date</span>
-          <input type="date" value={date} onChange={e=>setDate(e.target.value)}/></div>
+          <div className="stat">{dayBookings.length} booking{dayBookings.length!==1?"s":""} · {deployed} cleaner{deployed!==1?"s":""} deployed · tap any job to edit</div></div>
+        <div className="board-actions">
+          <button className="btn-x" disabled={dayBookings.length===0} onClick={()=>exportDeployment(dayBookings,date)}>⤓ Export Excel</button>
+          <div className="date-pick"><span className="lab" style={{margin:0}}>Date</span>
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)}/></div>
+        </div>
       </div>
 
       {dayBookings.length===0
@@ -701,7 +747,7 @@ function DeploymentView({bookings,date,setDate,highlight}){
                       : jobs.map((j,i)=>(
                           <React.Fragment key={j.id}>
                             {i>0 && (()=>{const [c]=gapTag(jobs[i-1],{start:j.time.start,end:j.time.end,area:j.area});return <div className="sep"><span className={"sep-dot "+c}/></div>;})()}
-                            <div className={"cell"+(j.id===highlight?" cell-new":"")}>
+                            <div className={"cell clickable"+(j.id===highlight?" cell-new":"")} onClick={()=>setEditing(j)} title="Tap to edit">
                               {j.id===highlight && <span className="new-tag">NEW</span>}
                               <div className="c-name">{j.clientName}</div>
                               {(j.building||j.apt) && <div className="c-addr">{[j.building,j.apt].filter(Boolean).join(", ")}</div>}
@@ -721,6 +767,11 @@ function DeploymentView({bookings,date,setDate,highlight}){
               <span className="ld ok"/> ok <span className="ld tight"/> tight <span className="ld conflict"/> can't reach in time
             </div>
           </>}
+
+      {editing && <EditBookingModal booking={editing}
+        onSave={(id,changes)=>{onUpdate(id,changes);setEditing(null);}}
+        onDelete={(id)=>{onDelete(id);setEditing(null);}}
+        onClose={()=>setEditing(null)}/>}
     </div>
   );
 }
@@ -732,9 +783,12 @@ function DriverView({bookings,date,setDate}){
     <div className="board">
       <div className="board-hd">
         <div><h2>Driver schedule</h2>
-          <div className="stat">{runs.length} event{runs.length!==1?"s":""} · drop 30 min before start, collect at end</div></div>
-        <div className="date-pick"><span className="lab" style={{margin:0}}>Date</span>
-          <input type="date" value={date} onChange={e=>setDate(e.target.value)}/></div>
+          <div className="stat">{runs.length} event{runs.length!==1?"s":""} · drop 30 min before start, collect at end · tap 📍 to navigate</div></div>
+        <div className="board-actions">
+          <button className="btn-x" disabled={runs.length===0} onClick={()=>exportDriver(runs,date)}>⤓ Export Excel</button>
+          <div className="date-pick"><span className="lab" style={{margin:0}}>Date</span>
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)}/></div>
+        </div>
       </div>
       {runs.length===0
         ? <div className="empty-board">No driver events on this date yet.</div>
@@ -751,6 +805,8 @@ function DriverView({bookings,date,setDate}){
                       {grouped && <span className="grp-badge">GROUPED ×{r.cleaners.length}</span>}</div>
                     <div className="drv-where">{where}</div>
                   </div>
+                  {r.gps &&
+                    <a className="drv-pin" href={mapsLink(r.gps)} target="_blank" rel="noopener noreferrer" title="Open in Google Maps">📍 Open</a>}
                 </div>
               );
             })}
@@ -811,6 +867,116 @@ function ConfirmModal({data,onSave,onCancel}){
           <button className="mb-ok" onClick={onSave}>Save & deploy</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ---------------- edit booking modal ---------------- */
+function EditBookingModal({booking,onSave,onDelete,onClose}){
+  const b=booking;
+  const [name,setName]=useState(b.clientName);
+  const [timeText,setTimeText]=useState(`${b.time.start}-${b.time.end}`);
+  const [materials,setMaterials]=useState(!!b.materials);
+  const [price,setPrice]=useState(b.price??"");
+  const [code,setCode]=useState(b.code||"O");
+  const [building,setBuilding]=useState(b.building||"");
+  const [apt,setApt]=useState(b.apt||"");
+  const [area,setArea]=useState(b.area||"");
+  const [gps,setGps]=useState(b.gps||null);
+  const [cleanerId,setCleanerId]=useState(b.cleanerId);
+  const [notes,setNotes]=useState(b.notes||"");
+  const [showMap,setShowMap]=useState(false);
+  const time=parseTimeRange(timeText);
+  const cleaner=CLEANERS.find(c=>c.id===cleanerId);
+  const valid=name.trim() && time && cleaner;
+
+  function save(){
+    if(!valid) return;
+    onSave(b.id,{ clientName:name, time, materials, price, code, building, apt, area, gps, notes,
+      cleanerId, cleanerName:cleaner.name });
+  }
+
+  return(
+    <div className="ovl" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <h2>Edit booking</h2>
+        <p className="msub">{b.seed?"Sample booking — changes apply for this session.":"Update any detail and save."}</p>
+
+        <div className="field">
+          <label className="lab">Client name</label>
+          <input value={name} onChange={e=>setName(e.target.value)}/>
+        </div>
+        <div className="field">
+          <label className="lab">Time</label>
+          <input value={timeText} onChange={e=>setTimeText(e.target.value)} placeholder="9-12 or 15:00-17:00"/>
+          {time
+            ? <div className="time-parsed"><span className="chip num">{time.start}–{time.end}</span><span className="chip dur num">{fmtDur(time.minutes)}</span></div>
+            : <p className="hint err">Enter a valid range like 9-12.</p>}
+        </div>
+        <div className="field">
+          <label className="lab">Cleaner</label>
+          <select value={cleanerId} onChange={e=>setCleanerId(e.target.value)}>
+            {CLEANERS.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+        <div className="row2">
+          <div className="field">
+            <label className="lab">Materials</label>
+            <div className="toggle">
+              <button className={materials?"on":""} onClick={()=>setMaterials(true)}>With</button>
+              <button className={!materials?"on":""} onClick={()=>setMaterials(false)}>Without</button>
+            </div>
+          </div>
+          <div className="field">
+            <label className="lab">Price (AED)</label>
+            <div className="price-in"><input inputMode="numeric" value={price} onChange={e=>setPrice(e.target.value)}/><span className="aed">AED</span></div>
+          </div>
+        </div>
+        <div className="field">
+          <label className="lab">Job code</label>
+          <select value={code} onChange={e=>setCode(e.target.value)}>
+            <option value="O">O</option><option value="C">C</option>
+          </select>
+        </div>
+        <div className="row2">
+          <div className="field">
+            <label className="lab">Building</label>
+            <input value={building} onChange={e=>setBuilding(e.target.value)}/>
+          </div>
+          <div className="field">
+            <label className="lab">Apt / villa / office</label>
+            <input value={apt} onChange={e=>setApt(e.target.value)}/>
+          </div>
+        </div>
+        <div className="field">
+          <label className="lab">Area</label>
+          <select value={area} onChange={e=>setArea(e.target.value)}>
+            {AREAS.map(a=><option key={a} value={a}>{a}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          {gps
+            ? <div className="loc-btn set"><div className="loc-set" style={{width:"100%"}}>
+                <div><div style={{fontWeight:600}}>📍 Location set</div><div className="co num">{gps.lat.toFixed(4)}, {gps.lng.toFixed(4)}</div></div>
+                <button className="re" onClick={()=>setShowMap(true)}>Change</button></div></div>
+            : <button className="loc-btn" onClick={()=>setShowMap(true)}><span>📍 Set location</span><span>›</span></button>}
+        </div>
+        <div className="field">
+          <label className="lab">Notes</label>
+          <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={2}/>
+        </div>
+
+        <div className="edit-actions">
+          <button className="del" onClick={()=>onDelete(b.id)}>Delete</button>
+          <button className="mb-cancel grow" onClick={onClose}>Cancel</button>
+          <button className="mb-ok grow" style={{opacity:valid?1:.5}} disabled={!valid} onClick={save}>Save</button>
+        </div>
+      </div>
+
+      {showMap && <MapModal
+        onPick={p=>{setBuilding(p.name);setArea(p.area);setGps({lat:p.lat,lng:p.lng});setShowMap(false);}}
+        onCoords={(lat,lng)=>{setArea(detectAreaFromCoords(lat,lng));setGps({lat,lng});setShowMap(false);}}
+        onClose={()=>setShowMap(false)}/>}
     </div>
   );
 }
