@@ -1,233 +1,13 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useCallback } from "react";
 import * as XLSX from "xlsx";
+import { CSS } from "./styles.js";
 import { supabase } from "./supabaseClient.js";
+import {
+  getCleaners, getBookingsForDate, findClientByPhone, getLocation,
+  createBooking, updateBooking, cancelBooking, subscribeChanges, timeObj
+} from "./db.js";
 
-/* ============================================================
-   AR Cleaning — Dispatch prototype (mock data, no backend)
-   Three linked views sharing one live set of bookings:
-     • New booking   — staff enter client, system assigns
-     • Deployment    — per-cleaner day board with travel-gap checks
-     • Driver schedule — auto drop/collect events, grouped by area
-   Every saved booking is aware of the ones already placed.
-   ============================================================ */
-
-const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
-:root{
-  --ink:#14201c; --canvas:#eef1f0; --surface:#ffffff;
-  --go:#0e7c5a; --go-soft:#e3f2ec;
-  --tight:#b7791f; --tight-soft:#f6ecd7;
-  --conflict:#c33a2e; --conflict-soft:#f7e3e1;
-  --blue:#3452b4; --blue-soft:#e7ecfb;
-  --muted:#64726d; --line:#d9e0dd; --line-2:#eaeeec;
-  --sheet-green:#3aab4c; --sheet-tan:#f6e2a6;
-  --disp:'Space Grotesk',system-ui,sans-serif; --body:'Inter',system-ui,sans-serif;
-}
-*{box-sizing:border-box}
-.ar-root{font-family:var(--body);color:var(--ink);background:var(--canvas);min-height:100vh;-webkit-font-smoothing:antialiased}
-.num{font-family:var(--disp);font-feature-settings:"tnum" 1;font-variant-numeric:tabular-nums}
-
-.ar-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;
-  padding:18px 22px 14px;background:var(--surface);flex-wrap:wrap}
-.ar-head h1{font-family:var(--disp);font-weight:600;font-size:20px;margin:0;letter-spacing:-.01em}
-.ar-head .sub{color:var(--muted);font-size:13px}
-.ar-brand{font-family:var(--disp);font-weight:600;font-size:13px;color:var(--go);letter-spacing:.02em}
-
-.nav{display:flex;gap:2px;padding:0 18px;background:var(--surface);border-bottom:1px solid var(--line)}
-@media(max-width:860px){.nav{padding:0 8px;overflow-x:auto}}
-.nav button{font-family:var(--disp);font-weight:600;font-size:13.5px;color:var(--muted);background:none;border:none;
-  padding:13px 16px;cursor:pointer;border-bottom:2.5px solid transparent;white-space:nowrap;transition:color .12s}
-.nav button.on{color:var(--go);border-bottom-color:var(--go)}
-.nav .count{font-family:var(--disp);font-size:11px;background:var(--line-2);color:var(--muted);border-radius:20px;padding:1px 7px;margin-left:6px}
-.nav button.on .count{background:var(--go-soft);color:var(--go)}
-
-.banner{max-width:1040px;margin:16px auto 0;padding:0 22px}
-.banner-in{display:flex;align-items:center;gap:12px;background:var(--go-soft);border:1px solid #bfe0d1;border-radius:12px;padding:13px 16px}
-.banner-in .bc{width:26px;height:26px;border-radius:50%;background:var(--go);color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;flex:0 0 auto}
-.banner-in .bt{font-size:14px;font-weight:600;color:var(--ink)}
-.banner-in .bt span{font-weight:400;color:var(--muted)}
-.banner-in .bx{margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:20px;line-height:1}
-
-.ar-wrap{max-width:1040px;margin:0 auto;padding:22px;display:grid;grid-template-columns:1fr 380px;gap:22px;align-items:start}
-@media(max-width:860px){.ar-wrap{grid-template-columns:1fr;padding:16px;gap:16px}}
-
-.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px}
-.card + .card{margin-top:16px}
-.sec-title{font-family:var(--disp);font-weight:600;font-size:12px;letter-spacing:.06em;color:var(--muted);text-transform:uppercase;margin:0 0 14px}
-
-.field{margin-bottom:13px}.field:last-child{margin-bottom:0}
-.lab{display:block;font-size:12.5px;font-weight:500;color:var(--muted);margin-bottom:5px}
-.lab .req{color:var(--conflict)}
-input,select,textarea{width:100%;font-family:var(--body);font-size:15px;color:var(--ink);background:var(--surface);
-  border:1.5px solid var(--line);border-radius:9px;padding:11px 12px;outline:none;transition:border-color .12s}
-input:focus,select:focus,textarea:focus{border-color:var(--go)}
-textarea{resize:vertical;min-height:56px;line-height:1.45}
-input::placeholder,textarea::placeholder{color:#9aa8a2}
-.hint{font-size:12px;color:var(--muted);margin-top:5px}.hint.err{color:var(--conflict)}
-.phone-row{display:flex;gap:8px}.phone-cc{flex:0 0 78px}
-.phone-cc input{text-align:center;font-family:var(--disp);color:var(--muted)}
-.row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-@media(max-width:520px){.row2{grid-template-columns:1fr}}
-
-.time-parsed{display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap}
-.chip{font-family:var(--disp);font-weight:600;font-size:14px;background:var(--go-soft);color:var(--go);border-radius:8px;padding:6px 11px}
-.chip.dur{background:var(--line-2);color:var(--ink)}
-.toggle{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.toggle button{font-family:var(--body);font-weight:600;font-size:14px;padding:12px;border-radius:10px;border:1.5px solid var(--line);background:var(--surface);color:var(--muted);cursor:pointer;transition:all .12s}
-.toggle button.on{border-color:var(--go);background:var(--go-soft);color:var(--go)}
-.price-in{position:relative}
-.price-in .aed{position:absolute;right:12px;top:50%;transform:translateY(-50%);font-family:var(--disp);font-weight:600;color:var(--muted);font-size:14px;pointer-events:none}
-.price-in input{padding-right:52px;font-family:var(--disp);font-weight:600;font-size:16px}
-.suggest{display:inline-flex;align-items:center;gap:8px;margin-top:7px;font-size:12.5px;color:var(--muted)}
-.suggest button{font-family:var(--body);font-size:12px;font-weight:600;color:var(--go);background:var(--go-soft);border:none;border-radius:7px;padding:4px 9px;cursor:pointer}
-
-.loc-btn{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;font-family:var(--body);font-weight:600;font-size:14px;padding:13px 14px;border-radius:10px;border:1.5px dashed var(--line);background:var(--surface);color:var(--go);cursor:pointer;transition:all .12s}
-.loc-btn:hover{border-color:var(--go)}
-.loc-btn.set{border-style:solid;border-color:var(--go);background:var(--go-soft)}
-.loc-set{display:flex;align-items:flex-start;gap:10px;justify-content:space-between}
-.loc-set .co{font-family:var(--disp);font-size:11.5px;color:var(--muted);margin-top:3px}
-.loc-set .re{font-size:12px;font-weight:600;color:var(--go);background:none;border:none;cursor:pointer;padding:0}
-.loc-required{margin-top:8px;font-size:12.5px;font-weight:600;color:var(--conflict);background:var(--conflict-soft);padding:8px 11px;border-radius:8px}
-
-.sys{position:sticky;top:22px}
-@media(max-width:860px){.sys{position:static}}
-.sys-card{background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden}
-.sys-hd{padding:14px 18px;border-bottom:1px solid var(--line-2);display:flex;align-items:center;gap:8px}
-.sys-hd .dot{width:8px;height:8px;border-radius:50%;background:var(--go)}
-.sys-hd h3{font-family:var(--disp);font-weight:600;font-size:13px;margin:0;letter-spacing:.02em}
-.sys-body{padding:16px 18px}
-.sys-empty{color:var(--muted);font-size:13.5px;line-height:1.5}
-.blk{padding:13px 0;border-bottom:1px solid var(--line-2)}.blk:first-child{padding-top:0}.blk:last-child{border-bottom:none;padding-bottom:0}
-.blk-lab{font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin-bottom:7px}
-.cf-top{display:flex;align-items:center;gap:8px;margin-bottom:9px}
-.badge{font-family:var(--disp);font-size:10.5px;font-weight:600;letter-spacing:.04em;padding:3px 8px;border-radius:6px}
-.badge.go{background:var(--go-soft);color:var(--go)}
-.badge.reg{background:var(--blue-soft);color:var(--blue)}
-.cf-name{font-family:var(--disp);font-weight:600;font-size:16px}
-.cf-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px 14px;margin:4px 0 12px}
-.cf-grid .k{font-size:11px;color:var(--muted)}.cf-grid .v{font-size:13.5px;font-weight:600}.cf-grid .v.num{font-size:14px}
-.mini-btn{width:100%;font-family:var(--body);font-weight:600;font-size:13px;padding:10px;border-radius:9px;border:none;cursor:pointer;transition:filter .12s}
-.mini-btn:hover{filter:brightness(.96)}
-.mini-btn.pri{background:var(--go);color:#fff}
-.mini-btn.ghost{background:none;border:1.5px solid var(--line);color:var(--go)}
-.match{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:var(--go);background:var(--go-soft);padding:8px 11px;border-radius:8px;margin-top:10px}
-.area-det{display:flex;align-items:center;gap:8px}.area-det .an{font-family:var(--disp);font-weight:600;font-size:15px}
-.aa-mode{font-family:var(--disp);font-size:10.5px;font-weight:600;letter-spacing:.05em;padding:3px 8px;border-radius:6px;background:var(--go-soft);color:var(--go)}
-.aa-name{font-family:var(--disp);font-weight:700;font-size:26px;letter-spacing:-.01em;margin:8px 0 10px}
-.reasons{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
-.reasons li{display:flex;align-items:center;gap:8px;font-size:13px}
-.reasons li .tk{color:var(--go);font-weight:700;flex:0 0 auto}
-.change-sel{margin-top:12px}.change-sel .lab{margin-bottom:6px}
-.conflict-box{background:var(--conflict-soft);border-radius:10px;padding:13px}
-.conflict-box .ch{display:flex;align-items:center;gap:7px;font-family:var(--disp);font-weight:600;font-size:13px;color:var(--conflict);margin-bottom:8px}
-.conflict-box ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px}
-.conflict-box li{font-size:12.5px}.conflict-box li b{font-weight:600}
-.save-wrap{margin-top:16px}
-.save-btn{width:100%;font-family:var(--disp);font-weight:600;font-size:16px;padding:15px;border-radius:12px;border:none;background:var(--go);color:#fff;cursor:pointer;letter-spacing:.01em;transition:filter .12s}
-.save-btn:hover{filter:brightness(.96)}
-.save-btn:disabled{background:var(--line);color:#9aa8a2;cursor:not-allowed}
-.save-note{text-align:center;font-size:12px;color:var(--muted);margin-top:8px}
-
-.ovl{position:fixed;inset:0;background:rgba(20,32,28,.5);display:flex;align-items:center;justify-content:center;padding:16px;z-index:50}
-.modal{background:var(--surface);border-radius:16px;width:100%;max-width:440px;max-height:90vh;overflow:auto;padding:22px}
-.modal h2{font-family:var(--disp);font-weight:600;font-size:18px;margin:0 0 4px}
-.modal .msub{color:var(--muted);font-size:13px;margin:0 0 16px}
-.place-list{display:flex;flex-direction:column;gap:8px;margin-top:12px}
-.place{display:flex;align-items:center;justify-content:space-between;gap:10px;text-align:left;border:1.5px solid var(--line);border-radius:10px;padding:11px 13px;background:var(--surface);cursor:pointer;transition:border-color .12s}
-.place:hover{border-color:var(--go)}
-.place .pn{font-weight:600;font-size:14px}.place .pa{font-size:12px;color:var(--muted)}.place .pc{font-family:var(--disp);font-size:11px;color:var(--muted)}
-.orline{display:flex;align-items:center;gap:10px;margin:16px 0;color:var(--muted);font-size:12px}
-.orline::before,.orline::after{content:"";height:1px;background:var(--line);flex:1}
-.modal-actions{display:flex;gap:10px;margin-top:18px}
-.modal-actions button{flex:1;font-family:var(--body);font-weight:600;font-size:14px;padding:12px;border-radius:10px;cursor:pointer;border:none}
-.mb-cancel{background:var(--line-2);color:var(--ink)}.mb-ok{background:var(--go);color:#fff}
-.confirm-grid{display:grid;grid-template-columns:auto 1fr;gap:11px 16px;margin:6px 0 4px}
-.confirm-grid .ck{font-size:12px;color:var(--muted);align-self:center}
-.confirm-grid .cv{font-weight:600;font-size:14.5px}.confirm-grid .cv.num{font-family:var(--disp)}.confirm-grid .cv.big{font-size:16px}
-
-/* board / deployment / driver */
-.board{max-width:1040px;margin:0 auto;padding:22px}
-@media(max-width:860px){.board{padding:16px}}
-.board-hd{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:18px;flex-wrap:wrap}
-.board-hd h2{font-family:var(--disp);font-weight:600;font-size:19px;margin:0}
-.board-hd .stat{color:var(--muted);font-size:13px;margin-top:3px}
-.date-pick{display:flex;align-items:center;gap:8px}.date-pick input{width:auto}
-.dep-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-@media(max-width:760px){.dep-grid{grid-template-columns:1fr}}
-.dep-card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px;transition:box-shadow .2s}
-.dep-card.idle{opacity:.72}
-.dep-card.hl{box-shadow:0 0 0 2px var(--go)}
-.dep-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
-.dep-name{font-family:var(--disp);font-weight:600;font-size:16px}
-.dep-jobs{font-size:12px;color:var(--muted)}
-.dep-idle{font-size:13px;color:var(--muted);padding:4px 0}
-.timeline{display:flex;flex-direction:column}
-.tl-row{display:flex;gap:12px;align-items:stretch}
-.tl-time{font-family:var(--disp);font-size:12.5px;color:var(--muted);flex:0 0 96px;padding-top:12px}
-.tl-body{flex:1;border-left:2px solid var(--line);padding:12px 0 12px 14px;position:relative}
-.tl-body::before{content:"";position:absolute;left:-6px;top:16px;width:10px;height:10px;border-radius:50%;background:var(--go)}
-.tl-body.drv::before{background:var(--muted)}
-.tl-body.new-hl{background:var(--go-soft);border-radius:0 8px 8px 0;margin-left:-2px;padding-left:16px;border-left:3px solid var(--go)}
-.tl-title{font-weight:600;font-size:14px;display:flex;align-items:center;flex-wrap:wrap;gap:6px}
-.tl-meta{font-size:12.5px;color:var(--muted);margin-top:2px}
-.gap{display:inline-flex;align-items:center;gap:5px;font-family:var(--disp);font-size:11px;font-weight:600;padding:2px 7px;border-radius:5px}
-.gap.ok{background:var(--go-soft);color:var(--go)}.gap.tight{background:var(--tight-soft);color:var(--tight)}.gap.conflict{background:var(--conflict-soft);color:var(--conflict)}
-.drv-list{display:flex;flex-direction:column;gap:10px}
-.drv-run{display:flex;gap:14px;align-items:flex-start;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
-.drv-time{font-family:var(--disp);font-weight:600;font-size:15px;flex:0 0 60px;padding-top:1px}
-.drv-type{font-family:var(--disp);font-size:10.5px;font-weight:700;letter-spacing:.05em;padding:3px 9px;border-radius:6px;flex:0 0 auto;align-self:flex-start;margin-top:1px}
-.drv-type.drop{background:var(--blue-soft);color:var(--blue)}
-.drv-type.collect{background:var(--tight-soft);color:var(--tight)}
-.drv-info{flex:1}
-.drv-who{font-weight:600;font-size:14px}
-.drv-where{font-size:12.5px;color:var(--muted);margin-top:2px}
-.grp-badge{font-family:var(--disp);font-size:10px;font-weight:600;color:var(--go);background:var(--go-soft);border-radius:5px;padding:2px 7px;margin-left:8px}
-.empty-board{text-align:center;color:var(--muted);padding:50px 20px;font-size:14px;background:var(--surface);border:1px dashed var(--line);border-radius:14px}
-.steps{list-style:none;margin:0;padding:0}
-.steps li{display:flex;align-items:center;gap:11px;padding:8px 0;border-bottom:1px solid var(--line-2);font-size:13.5px}
-.steps li:last-child{border-bottom:none}
-.steps .s-tk{width:19px;height:19px;border-radius:50%;background:var(--go);color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;flex:0 0 auto}
-.demo-note{max-width:1040px;margin:0 auto;padding:0 22px 26px;color:var(--muted);font-size:12px;line-height:1.6}
-.demo-note b{color:var(--ink)}.demo-note code{font-family:var(--disp);background:var(--line-2);padding:1px 6px;border-radius:5px;font-size:11.5px}
-.sheet{border:2px solid var(--sheet-green);border-radius:8px;overflow-x:auto}
-.sheet-title{background:var(--sheet-green);color:#fff;font-family:var(--disp);font-weight:600;font-size:16px;text-align:center;padding:9px 12px}
-.sheet-cols{display:flex;min-width:min-content}
-.sheet-col{flex:1 0 150px;min-width:150px;border-right:1px solid var(--line);display:flex;flex-direction:column}
-.sheet-col:last-child{border-right:none}
-.col-head{background:var(--sheet-tan);font-family:var(--disp);font-weight:600;font-size:14px;text-align:center;padding:8px 6px;border-bottom:1px solid var(--line)}
-.cell{padding:12px 10px 13px;text-align:center;border-bottom:1px solid var(--line);position:relative;line-height:1.35}
-.cell:last-child{border-bottom:none}
-.c-name{font-weight:600;font-size:13.5px;margin-bottom:3px}
-.c-addr{color:var(--muted);font-size:12px}
-.c-area{color:var(--muted);font-size:12px;margin-bottom:5px}
-.c-wm{color:var(--conflict);font-weight:600;font-size:12.5px}
-.c-time{font-family:var(--disp);font-weight:600;font-size:14px;margin-top:2px}
-.c-price{color:var(--conflict);font-family:var(--disp);font-weight:600;font-size:13px;margin-top:2px}
-.cell-new{background:var(--go-soft)}
-.cell-new::after{content:"";position:absolute;inset:0;box-shadow:inset 0 0 0 2px var(--go);pointer-events:none}
-.new-tag{position:absolute;top:5px;right:5px;font-family:var(--disp);font-size:9px;font-weight:700;color:#fff;background:var(--go);border-radius:4px;padding:1px 5px;letter-spacing:.04em;z-index:2}
-.muted-cell{color:var(--muted);font-size:12.5px;padding:16px 8px;text-align:center}
-.sep{height:0;position:relative;overflow:visible;z-index:3}
-.sep-dot{position:absolute;left:50%;top:-6px;transform:translateX(-50%);width:10px;height:10px;border-radius:50%;border:2px solid var(--surface)}
-.sep-dot.ok{background:var(--go)}.sep-dot.tight{background:var(--tight)}.sep-dot.conflict{background:var(--conflict)}
-.sheet-legend{margin-top:12px;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.sheet-legend .ld{width:10px;height:10px;border-radius:50%;display:inline-block}
-.sheet-legend .ld.ok{background:var(--go)}.sheet-legend .ld.tight{background:var(--tight)}.sheet-legend .ld.conflict{background:var(--conflict)}
-.board-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.btn-x{font-family:var(--body);font-weight:600;font-size:13px;padding:9px 14px;border-radius:9px;border:1.5px solid var(--go);background:var(--surface);color:var(--go);cursor:pointer;transition:all .12s}
-.btn-x:hover{background:var(--go-soft)}
-.btn-x:disabled{border-color:var(--line);color:#9aa8a2;cursor:not-allowed;background:var(--surface)}
-.cell.clickable{cursor:pointer;transition:background .1s}
-.cell.clickable:hover{background:var(--line-2)}
-.cell.clickable.cell-new:hover{background:#d6ecdf}
-.drv-pin{flex:0 0 auto;align-self:center;font-family:var(--disp);font-weight:600;font-size:12.5px;text-decoration:none;color:var(--blue);background:var(--blue-soft);border-radius:8px;padding:8px 12px;white-space:nowrap}
-.drv-pin:hover{filter:brightness(.96)}
-.edit-actions{display:flex;gap:10px;margin-top:18px}
-.edit-actions .del{flex:0 0 auto;background:var(--conflict-soft);color:var(--conflict);border:none;font-weight:600;font-family:var(--body);font-size:14px;padding:12px 14px;border-radius:10px;cursor:pointer}
-.edit-actions .grow{flex:1}
-`;
-
-/* ---------------- mock data ---------------- */
+/* ---------- static reference ---------- */
 const AREA_COORDS = {
   "Reem Island":[24.4991,54.4065],"Corniche":[24.4764,54.3376],"Al Khalidiyah":[24.4611,54.3486],
   "Al Bateen":[24.4550,54.3300],"Al Nahyan":[24.4700,54.3800],"Khalifa City":[24.4200,54.5800],
@@ -244,37 +24,18 @@ const PLACES = [
   {name:"Khalifa City Villa A", area:"Khalifa City", lat:24.4188, lng:54.5822},
   {name:"Al Raha Gardens", area:"Al Raha", lat:24.4571, lng:54.6033},
 ];
-const CLIENTS = {
-  "+971501234567":{ name:"Sarah Ahmed", bookings:12, last:"Tue 26 Aug 2026", regular:true,
-    prefCleaner:"Leah", usualDay:"Tuesday", usualTime:"09:00–12:00", usualMaterials:true,
-    usual:{ building:"Bel Ghailam Tower", apt:"705", area:"Corniche", lat:24.4761, lng:54.3389, timeText:"09:00-12:00" }},
-  "+971559876543":{ name:"Omar Khan", bookings:3, last:"Thu 14 Aug 2026", regular:false,
-    prefCleaner:null, usualDay:null, usualTime:null, usualMaterials:false,
-    usual:{ building:"Bateen Park Residence", apt:"12", area:"Al Bateen", lat:24.4548, lng:54.3312, timeText:"10:00-13:00" }},
-};
-const CLEANERS = [
-  {id:"c1", name:"Leah",     worked:["+971501234567"], seed:[{start:"06:30",end:"08:30",area:"Reem Island",client:"Aisha"}]},
-  {id:"c2", name:"Roseline", worked:[], seed:[]},
-  {id:"c3", name:"Zaynab",   worked:[], seed:[{start:"09:00",end:"12:00",area:"Al Bateen",client:"Reem"}]},
-  {id:"c4", name:"Eva",      worked:[], seed:[]},
-  {id:"c5", name:"Colline",  worked:[], seed:[{start:"13:00",end:"16:00",area:"Yas Island",client:"John"}]},
-  {id:"c6", name:"Sara",     worked:[], seed:[]},
-  {id:"c7", name:"Angel",    worked:[], seed:[]},
-  {id:"c8", name:"Razelle",  worked:[], seed:[]},
-];
 const RATE_PER_HOUR = 40, MATERIALS_FEE = 20;
 const TODAY = new Date().toISOString().slice(0,10);
 
-/* ---------------- helpers ---------------- */
+/* ---------- helpers ---------- */
 const toMin=(t)=>{const [h,m]=t.split(":").map(Number);return h*60+m;};
 const minToStr=(mins)=>`${String(Math.floor(mins/60)).padStart(2,"0")}:${String(mins%60).padStart(2,"0")}`;
 const fmtDur=(mins)=>{const h=Math.floor(mins/60),m=mins%60; return m?`${h}h ${m}m`:`${h}h`;};
-
 function parseTimeRange(raw){
   if(!raw) return null;
   let s = raw.toLowerCase().trim().replace(/\s+/g,"").replace(/to|–|—|~|\.\.|until/g,"-");
   if(!s.includes("-")) return null;
-  const [aRaw,bRaw] = s.split("-");
+  const [aRaw,bRaw]=s.split("-");
   const one=(t)=>{
     if(t===undefined||t==="") return null;
     let pm=false,am=false;
@@ -302,6 +63,7 @@ function haversine(a,b){
 function travelMin(a,b){
   if(!a||!b) return 0;
   if(a===b) return 8;
+  if(!AREA_COORDS[a]||!AREA_COORDS[b]) return 20;
   return Math.max(10, Math.round(haversine(AREA_COORDS[a],AREA_COORDS[b])/32*60)+8);
 }
 function detectAreaFromCoords(lat,lng){
@@ -313,50 +75,15 @@ function parseGmaps(url){
   const m=url.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/)||url.match(/[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)/)||url.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
   return m?{lat:parseFloat(m[1]),lng:parseFloat(m[2])}:null;
 }
-// each cleaner's jobs for a date, drawn from the shared bookings list
-function scheduleFor(cleanerId, date, bookings){
-  return bookings.filter(b=>b.cleanerId===cleanerId && b.date===date)
-    .map(b=>({start:b.time.start,end:b.time.end,area:b.area,client:b.clientName}))
-    .sort((a,b)=>toMin(a.start)-toMin(b.start));
-}
+const mapsLink=(gps)=>gps?`https://waze.com/ul?ll=${gps.lat},${gps.lng}&navigate=yes`:"";
+function compactTime(t){ let [h,m]=t.split(":"); h=String(parseInt(h,10)); return m==="00"?h:`${h}:${m}`; }
+function fmtSheetDate(date){ try{ return new Date(date+"T00:00:00").toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"short",year:"numeric"}); }catch(e){ return date; } }
 function gapTag(prev,cur){
   const need=travelMin(prev.area,cur.area), gap=toMin(cur.start)-toMin(prev.end);
   if(gap<need) return ["conflict",`can't reach · needs ${need}m, ${gap}m`];
   if(gap-need<15) return ["tight",`tight · ${gap}m gap`];
   return ["ok",`ok · ${gap}m gap`];
 }
-
-/* ---------------- assignment engine ---------------- */
-function evaluateCleaners({time,area,clientPhone}, bookings, date){
-  if(!time||!area) return null;
-  const jS=time.startMin,jE=time.endMin;
-  const results=CLEANERS.map((cl)=>{
-    const bks=scheduleFor(cl.id,date,bookings);
-    const overlap=bks.find(b=>toMin(b.start)<jE&&toMin(b.end)>jS);
-    if(overlap) return {cleaner:cl,ok:false,reason:`Already booked ${overlap.start}–${overlap.end} (${overlap.client})`};
-    const before=bks.filter(b=>toMin(b.end)<=jS).sort((a,b)=>toMin(b.end)-toMin(a.end))[0];
-    const after =bks.filter(b=>toMin(b.start)>=jE).sort((a,b)=>toMin(a.start)-toMin(b.start))[0];
-    if(before){const need=travelMin(before.area,area),gap=jS-toMin(before.end);
-      if(gap<need) return {cleaner:cl,ok:false,reason:`Can't travel from ${before.area} in time — needs ${need}m, only ${gap}m after ${before.end}`};}
-    if(after){const need=travelMin(area,after.area),gap=toMin(after.start)-jE;
-      if(gap<need) return {cleaner:cl,ok:false,reason:`Next job (${after.area} ${after.start}) becomes impossible — needs ${need}m, only ${gap}m`};}
-    let score=0;const reasons=["Available","No booking conflict"];
-    const preferred=clientPhone&&CLIENTS[clientPhone]?.prefCleaner===cl.name;
-    const worked=clientPhone&&cl.worked.includes(clientPhone);
-    if(preferred){score+=100;reasons.push("Client's preferred cleaner");}
-    if(worked&&!preferred){score+=40;reasons.push("Has worked with this client before");}
-    if(before){const prox=travelMin(before.area,area);score+=Math.max(0,40-prox);
-      reasons.push(prox<=12?"Nearby previous booking":`Previous booking ${prox}m away`);}
-    else if(after){score+=Math.max(0,30-travelMin(area,after.area));}
-    else {score+=20;}
-    score+=(5-bks.length)*4;
-    reasons.push(`Suitable for ${fmtDur(jE-jS)} service`);
-    return {cleaner:cl,ok:true,score,reasons};
-  });
-  return {eligible:results.filter(r=>r.ok).sort((a,b)=>b.score-a.score), blocked:results.filter(r=>!r.ok), all:results};
-}
-
-/* build grouped driver runs for a date */
 function buildDriverRuns(bookings,date){
   const evs=[];
   const gpsOf=(b)=>b.gps||(AREA_COORDS[b.area]?{lat:AREA_COORDS[b.area][0],lng:AREA_COORDS[b.area][1]}:null);
@@ -373,19 +100,15 @@ function buildDriverRuns(bookings,date){
   });
   return runs.sort((a,b)=>a.min-b.min);
 }
-const mapsLink=(gps)=>gps?`https://waze.com/ul?ll=${gps.lat},${gps.lng}&navigate=yes`:"";
-
-/* ---------------- Excel export ---------------- */
 function exportDeployment(dayBookings,date){
   const rows=dayBookings.slice()
-    .sort((a,b)=>a.cleanerName.localeCompare(b.cleanerName)||a.time.startMin-b.time.startMin)
+    .sort((a,b)=>(a.cleanerName||"").localeCompare(b.cleanerName||"")||a.time.startMin-b.time.startMin)
     .map(b=>({Cleaner:b.cleanerName, Client:b.clientName, Building:b.building||"", "Apt/Villa":b.apt||"",
       Area:b.area, Start:b.time.start, End:b.time.end, Duration:fmtDur(b.time.minutes),
       Materials:b.materials?"W/m":"", Price:b.price??"", Code:b.code||"", Notes:b.notes||"",
       "Map link":mapsLink(b.gps)}));
   const ws=XLSX.utils.json_to_sheet(rows);
   rows.forEach((r,i)=>{ if(r["Map link"]){ const a=XLSX.utils.encode_cell({c:12,r:i+1}); if(ws[a]) ws[a].l={Target:r["Map link"],Tooltip:"Open in Waze"}; }});
-  ws["!cols"]=[{wch:10},{wch:20},{wch:20},{wch:9},{wch:14},{wch:7},{wch:7},{wch:8},{wch:9},{wch:8},{wch:6},{wch:24},{wch:16}];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Deployment");
   XLSX.writeFile(wb,`Deployment_${date}.xlsx`);
 }
@@ -394,42 +117,74 @@ function exportDriver(runs,date){
     Location:r.buildings.length?r.buildings.join(" / "):r.area, Area:r.area, "Map link":mapsLink(r.gps)}));
   const ws=XLSX.utils.json_to_sheet(rows);
   rows.forEach((r,i)=>{ if(r["Map link"]){ const a=XLSX.utils.encode_cell({c:5,r:i+1}); if(ws[a]) ws[a].l={Target:r["Map link"],Tooltip:"Open in Waze"}; }});
-  ws["!cols"]=[{wch:8},{wch:9},{wch:22},{wch:26},{wch:14},{wch:16}];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Driver schedule");
   XLSX.writeFile(wb,`Driver_${date}.xlsx`);
 }
 
-/* seed the shared bookings from cleaner base schedules */
-function seedBookings(){
-  const out=[];
-  CLEANERS.forEach(cl=>cl.seed.forEach((b,i)=>out.push({
-    id:`seed-${cl.id}-${i}`, clientName:b.client, phone:"", date:TODAY,
-    time:{start:b.start,end:b.end,startMin:toMin(b.start),endMin:toMin(b.end),minutes:toMin(b.end)-toMin(b.start)},
-    area:b.area, building:"", apt:"", materials:false, price:null, notes:"",
-    gps:AREA_COORDS[b.area]?{lat:AREA_COORDS[b.area][0],lng:AREA_COORDS[b.area][1]}:null,
-    cleanerId:cl.id, cleanerName:cl.name, mode:"AUTO", code:"O", seed:true,
-  })));
-  return out;
+/* ---------- assignment engine ---------- */
+function evaluateCleaners({time,area,preferredCleanerId,workedCleanerIds}, cleaners, bookingsForDate){
+  if(!time||!area||!cleaners||!cleaners.length) return null;
+  const jS=time.startMin,jE=time.endMin;
+  const results=cleaners.map((cl)=>{
+    const bks=bookingsForDate.filter(b=>b.cleanerId===cl.id)
+      .map(b=>({start:b.time.start,end:b.time.end,area:b.area||"",client:b.clientName}))
+      .sort((a,b)=>toMin(a.start)-toMin(b.start));
+    const overlap=bks.find(b=>toMin(b.start)<jE&&toMin(b.end)>jS);
+    if(overlap) return {cleaner:cl,ok:false,reason:`Already booked ${overlap.start}–${overlap.end} (${overlap.client})`};
+    const before=bks.filter(b=>toMin(b.end)<=jS).sort((a,b)=>toMin(b.end)-toMin(a.end))[0];
+    const after =bks.filter(b=>toMin(b.start)>=jE).sort((a,b)=>toMin(a.start)-toMin(b.start))[0];
+    if(before){const need=travelMin(before.area,area),gap=jS-toMin(before.end);
+      if(gap<need) return {cleaner:cl,ok:false,reason:`Can't travel from ${before.area||"previous job"} in time — needs ${need}m, only ${gap}m`};}
+    if(after){const need=travelMin(area,after.area),gap=toMin(after.start)-jE;
+      if(gap<need) return {cleaner:cl,ok:false,reason:`Next job (${after.area} ${after.start}) impossible — needs ${need}m, only ${gap}m`};}
+    let score=0;const reasons=["Available","No booking conflict"];
+    const preferred=preferredCleanerId&&cl.id===preferredCleanerId;
+    const worked=workedCleanerIds&&workedCleanerIds.has&&workedCleanerIds.has(cl.id);
+    if(preferred){score+=100;reasons.push("Client's preferred cleaner");}
+    if(worked&&!preferred){score+=40;reasons.push("Has worked with this client before");}
+    if(before){const prox=travelMin(before.area,area);score+=Math.max(0,40-prox);
+      reasons.push(prox<=12?"Nearby previous booking":`Previous booking ${prox}m away`);}
+    else if(after){score+=Math.max(0,30-travelMin(area,after.area));}
+    else {score+=20;}
+    score+=(5-bks.length)*4;
+    reasons.push(`Suitable for ${fmtDur(jE-jS)} service`);
+    return {cleaner:cl,ok:true,score,reasons};
+  });
+  return {eligible:results.filter(r=>r.ok).sort((a,b)=>b.score-a.score), blocked:results.filter(r=>!r.ok), all:results};
 }
 
 /* ============================================================ */
 function Dispatch(){
-  const [bookings,setBookings]=useState(seedBookings);
+  const [cleaners,setCleaners]=useState([]);
+  const [bookings,setBookings]=useState([]);
   const [view,setView]=useState("new");
   const [boardDate,setBoardDate]=useState(TODAY);
   const [highlight,setHighlight]=useState(null);
   const [banner,setBanner]=useState(null);
+  const [loading,setLoading]=useState(false);
+  const [err,setErr]=useState("");
 
-  function handleSave(bk){
-    setBookings(prev=>[...prev,bk]);
-    setBoardDate(bk.date);
-    setHighlight(bk.id);
-    setBanner({name:bk.clientName, cleaner:bk.cleanerName, time:`${bk.time.start}–${bk.time.end}`, area:bk.area});
-    setView("deployment");
-    window.scrollTo({top:0,behavior:"smooth"});
+  useEffect(()=>{ getCleaners().then(cs=>setCleaners(cs.map(c=>({id:c.id,name:c.name})))).catch(e=>setErr(e.message)); },[]);
+
+  const reload=useCallback(async ()=>{
+    setLoading(true);
+    try{ setBookings(await getBookingsForDate(boardDate)); setErr(""); }
+    catch(e){ setErr(e.message); } finally{ setLoading(false); }
+  },[boardDate]);
+  useEffect(()=>{ reload(); },[reload]);
+  useEffect(()=>{ const off=subscribeChanges(()=>reload()); return off; },[reload]);
+
+  async function handleSave(ui){
+    try{
+      const id=await createBooking(ui);
+      setHighlight(id);
+      setBanner({name:ui.clientName, cleaner:ui.cleanerName, time:`${ui.time.start}–${ui.time.end}`, area:ui.area});
+      setView("deployment"); window.scrollTo({top:0,behavior:"smooth"});
+      if(ui.date!==boardDate) setBoardDate(ui.date); else reload();
+    }catch(e){ alert("Could not save booking:\n"+e.message); }
   }
-  function updateBooking(id,changes){ setBookings(prev=>prev.map(b=>b.id===id?{...b,...changes}:b)); }
-  function deleteBooking(id){ setBookings(prev=>prev.filter(b=>b.id!==id)); }
+  async function handleUpdate(id,ui){ try{ await updateBooking(id,ui); reload(); }catch(e){ alert("Update failed:\n"+e.message); } }
+  async function handleCancel(id){ try{ await cancelBooking(id); reload(); }catch(e){ alert("Cancel failed:\n"+e.message); } }
 
   return(
     <div className="ar-root">
@@ -449,12 +204,15 @@ function Dispatch(){
       <nav className="nav">
         <button className={view==="new"?"on":""} onClick={()=>setView("new")}>New booking</button>
         <button className={view==="deployment"?"on":""} onClick={()=>setView("deployment")}>
-          Deployment<span className="count">{bookings.filter(b=>b.date===boardDate).length}</span>
+          Deployment<span className="count">{bookings.length}</span>
         </button>
         <button className={view==="driver"?"on":""} onClick={()=>setView("driver")}>
           Driver schedule<span className="count">{buildDriverRuns(bookings,boardDate).length}</span>
         </button>
       </nav>
+
+      {err && <div className="banner"><div className="banner-in" style={{background:"#f7e3e1",border:"1px solid #e6b8b2"}}>
+        <span className="bt" style={{color:"#c33a2e"}}>Database error: {err}</span></div></div>}
 
       {banner && view!=="new" &&
         <div className="banner"><div className="banner-in">
@@ -464,17 +222,19 @@ function Dispatch(){
         </div></div>}
 
       {view==="new" &&
-        <BookingForm bookings={bookings} onSave={handleSave}/>}
+        <BookingForm cleaners={cleaners} onSave={handleSave}/>}
       {view==="deployment" &&
-        <DeploymentView bookings={bookings} date={boardDate} setDate={d=>{setBoardDate(d);setHighlight(null);}} highlight={highlight} onUpdate={updateBooking} onDelete={deleteBooking}/>}
+        <DeploymentView bookings={bookings} cleaners={cleaners} loading={loading}
+          date={boardDate} setDate={d=>{setBoardDate(d);setHighlight(null);}} highlight={highlight}
+          onUpdate={handleUpdate} onDelete={handleCancel}/>}
       {view==="driver" &&
         <DriverView bookings={bookings} date={boardDate} setDate={setBoardDate}/>}
     </div>
   );
 }
 
-/* ---------------- booking form ---------------- */
-function BookingForm({bookings,onSave}){
+/* ---------- booking form ---------- */
+function BookingForm({cleaners,onSave}){
   const [name,setName]=useState("");
   const [cc,setCc]=useState("+971");
   const [phone,setPhone]=useState("");
@@ -485,8 +245,8 @@ function BookingForm({bookings,onSave}){
   const [materials,setMaterials]=useState(true);
   const [price,setPrice]=useState("");
   const [priceTouched,setPriceTouched]=useState(false);
-  const [notes,setNotes]=useState("");
   const [code,setCode]=useState("O");
+  const [notes,setNotes]=useState("");
   const [building,setBuilding]=useState("");
   const [apt,setApt]=useState("");
   const [area,setArea]=useState("");
@@ -495,44 +255,72 @@ function BookingForm({bookings,onSave}){
   const [override,setOverride]=useState(false);
   const [manualCleaner,setManualCleaner]=useState(null);
   const [showConfirm,setShowConfirm]=useState(false);
+  const [saving,setSaving]=useState(false);
+  const [dayBookings,setDayBookings]=useState([]);
 
   const fullPhone=cc+phone.replace(/\D/g,"");
   const time=useMemo(()=>parseTimeRange(timeText),[timeText]);
 
+  // lookup existing client by phone (debounced)
   useEffect(()=>{
     const digits=phone.replace(/\D/g,"");
-    if(cc==="+971"&&digits.length>=9){const key="+971"+digits;setExisting(CLIENTS[key]?{...CLIENTS[key],key}:null);}
-    else setExisting(null);
-    setUsedExisting(false);
+    if(cc!=="+971"||digits.length<9){ setExisting(null); setUsedExisting(false); return; }
+    let on=true; const t=setTimeout(async()=>{
+      try{ const c=await findClientByPhone("+971"+digits); if(on){ setExisting(c); setUsedExisting(false);} }
+      catch(e){ if(on) setExisting(null); }
+    },350);
+    return ()=>{on=false;clearTimeout(t);};
   },[phone,cc]);
 
+  // load bookings for the chosen date to feed the conflict engine
+  useEffect(()=>{
+    let on=true;
+    getBookingsForDate(date).then(b=>{ if(on) setDayBookings(b); }).catch(()=>{ if(on) setDayBookings([]); });
+    return ()=>{on=false;};
+  },[date]);
+
   const suggested=useMemo(()=>time?Math.round(time.minutes/60*RATE_PER_HOUR+(materials?MATERIALS_FEE:0)):null,[time,materials]);
+  const preferredCleanerId=existing?.prefs?.preferred_cleaner_id||null;
+  const workedCleanerIds=useMemo(()=> new Set(preferredCleanerId?[preferredCleanerId]:[]),[preferredCleanerId]);
   const assessment=useMemo(
-    ()=>evaluateCleaners({time,area,clientPhone:usedExisting?existing?.key:fullPhone}, bookings, date),
-    [time,area,usedExisting,existing,fullPhone,bookings,date]);
+    ()=>evaluateCleaners({time,area,preferredCleanerId,workedCleanerIds}, cleaners, dayBookings),
+    [time,area,preferredCleanerId,workedCleanerIds,cleaners,dayBookings]);
   const autoPick=assessment?.eligible?.[0]||null;
   const chosen=manualCleaner?assessment?.all.find(r=>r.cleaner.id===manualCleaner):autoPick;
-  const usualMatch=usedExisting&&existing?.usualTime&&time&&existing.usualTime.replace("–","-")===`${time.start}-${time.end}`;
 
-  function rebook(){
+  const prefName=existing?.prefs?.preferred_cleaner_id
+    ? (cleaners.find(c=>c.id===existing.prefs.preferred_cleaner_id)?.name||"—") : "—";
+  const usualTime=existing?.prefs?.preferred_start_time&&existing?.prefs?.preferred_end_time
+    ? `${existing.prefs.preferred_start_time.slice(0,5)}–${existing.prefs.preferred_end_time.slice(0,5)}` : null;
+  const usualMatch=usedExisting&&usualTime&&time&&usualTime.replace("–","-")===`${time.start}-${time.end}`;
+
+  async function rebook(){
     if(!existing) return;
-    const u=existing.usual;
-    setName(existing.name);setUsedExisting(true);setTimeText(u.timeText);setMaterials(existing.usualMaterials);
-    setBuilding(u.building);setApt(u.apt);setArea(u.area);setGps({lat:u.lat,lng:u.lng});
-    setPriceTouched(false);setPrice("");setManualCleaner(null);
+    setName(existing.name); setUsedExisting(true);
+    const pr=existing.prefs||{};
+    if(pr.preferred_start_time&&pr.preferred_end_time) setTimeText(`${pr.preferred_start_time.slice(0,5)}-${pr.preferred_end_time.slice(0,5)}`);
+    if(pr.preferred_cleaner_id) setManualCleaner(null);
+    if(pr.preferred_location_id){
+      try{ const l=await getLocation(pr.preferred_location_id);
+        if(l){ setBuilding(l.building_name||""); setApt(l.unit_number||""); setArea(l.area||"");
+          if(l.latitude!=null&&l.longitude!=null) setGps({lat:l.latitude,lng:l.longitude}); } }catch(e){}
+    }
+    setPriceTouched(false); setPrice("");
     setTimeout(()=>document.getElementById("bk-date")?.focus(),50);
   }
+
   const displayPrice=priceTouched?price:(price||"");
   const locMissing=building&&!gps;
-  const canSave=name.trim()&&phone.replace(/\D/g,"").length>=9&&time&&displayPrice&&area&&(gps||override)&&chosen&&chosen.ok;
+  const canSave=name.trim()&&phone.replace(/\D/g,"").length>=9&&time&&displayPrice&&area&&(gps||override)&&chosen&&chosen.ok&&!saving;
 
-  function doSave(){
-    onSave({
-      id:`bk-${Date.now()}`, clientName:name, phone:fullPhone, date,
-      time, materials, price:displayPrice, code, building, apt, area, gps, notes,
-      cleanerId:chosen.cleaner.id, cleanerName:chosen.cleaner.name, mode:manualCleaner?"MANUAL":"AUTO",
-    });
+  async function doSave(){
+    setSaving(true);
+    const ui={ clientName:name, phone:fullPhone, date, time, materials, price:displayPrice, code,
+      building, apt, area, gps, notes, cleanerId:chosen.cleaner.id, cleanerName:chosen.cleaner.name,
+      mode:manualCleaner?"MANUAL":"AUTO" };
     setShowConfirm(false);
+    await onSave(ui);
+    setSaving(false);
   }
 
   return(
@@ -551,7 +339,7 @@ function BookingForm({bookings,onSave}){
                 <div className="phone-cc"><input value={cc} onChange={e=>setCc(e.target.value)}/></div>
                 <input value={phone} onChange={e=>setPhone(e.target.value)} placeholder="50 123 4567" inputMode="tel"/>
               </div>
-              <p className="hint">Try <b>50 123 4567</b> (known client) or any new number.</p>
+              <p className="hint">Existing customers are matched by number automatically.</p>
             </div>
           </div>
 
@@ -588,12 +376,11 @@ function BookingForm({bookings,onSave}){
                   <button onClick={()=>{setPrice(String(suggested));setPriceTouched(true);}}>Use</button></span>}
             </div>
             <div className="field">
-              <label className="lab">Job code</label>
-              <select value={code} onChange={e=>setCode(e.target.value)}>
-                <option value="O">O</option>
-                <option value="C">C</option>
-              </select>
-              <p className="hint">Shown on the sheet as (price AED/{code}). Tell me what O and C mean and I'll label it clearly.</p>
+              <label className="lab">Payment</label>
+              <div className="toggle">
+                <button className={code==="O"?"on":""} onClick={()=>setCode("O")}>Online (O)</button>
+                <button className={code==="C"?"on":""} onClick={()=>setCode("C")}>Cash (C)</button>
+              </div>
             </div>
             <div className="field">
               <label className="lab">Notes</label>
@@ -642,17 +429,18 @@ function BookingForm({bookings,onSave}){
             <div className="sys-hd"><span className="dot"/><h3>System handles this</h3></div>
             <div className="sys-body">
               {!existing && !area && !time &&
-                <p className="sys-empty">As you enter the client, matches, area detection and cleaner assignment appear here automatically — and the booking flows straight into Deployment and the Driver schedule.</p>}
+                <p className="sys-empty">Enter the client and the system matches them, detects the area, assigns a cleaner, and saves everything to the database.</p>}
 
               {existing &&
                 <div className="blk">
-                  <div className="cf-top"><span className="badge go">CLIENT FOUND</span>{existing.regular&&<span className="badge reg">REGULAR</span>}</div>
+                  <div className="cf-top"><span className="badge go">CLIENT FOUND</span>
+                    {existing.prefs&&existing.prefs.booking_count>=5&&<span className="badge reg">REGULAR</span>}</div>
                   <div className="cf-name">{existing.name}</div>
                   <div className="cf-grid">
-                    <div><div className="k">Bookings</div><div className="v num">{existing.bookings}</div></div>
-                    <div><div className="k">Last booking</div><div className="v">{existing.last}</div></div>
-                    <div><div className="k">Preferred cleaner</div><div className="v">{existing.prefCleaner||"—"}</div></div>
-                    <div><div className="k">Usual</div><div className="v">{existing.usualDay?`${existing.usualDay} ${existing.usualTime}`:"—"}</div></div>
+                    <div><div className="k">Bookings</div><div className="v num">{existing.prefs?.booking_count??0}</div></div>
+                    <div><div className="k">Last booking</div><div className="v">{existing.prefs?.last_booking_date||"—"}</div></div>
+                    <div><div className="k">Preferred cleaner</div><div className="v">{prefName}</div></div>
+                    <div><div className="k">Usual</div><div className="v">{existing.prefs?.preferred_day?`${existing.prefs.preferred_day.trim()} ${usualTime||""}`:"—"}</div></div>
                   </div>
                   {!usedExisting
                     ? <><button className="mini-btn pri" onClick={()=>{setName(existing.name);setUsedExisting(true);}}>Use existing client</button>
@@ -685,19 +473,13 @@ function BookingForm({bookings,onSave}){
                 </div>}
 
               <div className="save-wrap">
-                <button className="save-btn" disabled={!canSave} onClick={()=>setShowConfirm(true)}>Review booking</button>
+                <button className="save-btn" disabled={!canSave} onClick={()=>setShowConfirm(true)}>{saving?"Saving…":"Review booking"}</button>
                 <p className="save-note">{canSave?"Ready — review, save, and it deploys automatically.":"Fill client, time, price, location and a valid cleaner to continue."}</p>
               </div>
             </div>
           </div>
         </div>
       </div>
-
-      <p className="demo-note">
-        <b>Prototype note.</b> Mock data, no backend — bookings you add live in this session and feed Deployment
-        + Driver schedule. New bookings respect ones already placed, so a second job for the same cleaner can trigger a
-        <b> conflict</b>. Try booking <code>Khalifa City</code> at <code>09:00-12:00</code> to see travel logic reject a cleaner.
-      </p>
 
       {showMap && <MapModal
         onPick={p=>{setBuilding(p.name);setArea(p.area);setGps({lat:p.lat,lng:p.lng});setShowMap(false);}}
@@ -710,14 +492,10 @@ function BookingForm({bookings,onSave}){
   );
 }
 
-/* ---------------- deployment view (sheet layout) ---------------- */
-function compactTime(t){ let [h,m]=t.split(":"); h=String(parseInt(h,10)); return m==="00"?h:`${h}:${m}`; }
-function fmtSheetDate(date){ try{ return new Date(date+"T00:00:00").toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"short",year:"numeric"}); }catch(e){ return date; } }
-
-function DeploymentView({bookings,date,setDate,highlight,onUpdate,onDelete}){
+/* ---------- deployment view (sheet) ---------- */
+function DeploymentView({bookings,cleaners,loading,date,setDate,highlight,onUpdate,onDelete}){
   const [editing,setEditing]=useState(null);
-  const dayBookings=bookings.filter(b=>b.date===date);
-  const lanes=CLEANERS.map(cl=>({cl,jobs:dayBookings.filter(b=>b.cleanerId===cl.id).sort((a,b)=>a.time.startMin-b.time.startMin)}));
+  const lanes=cleaners.map(cl=>({cl,jobs:bookings.filter(b=>b.cleanerId===cl.id).sort((a,b)=>a.time.startMin-b.time.startMin)}));
   const active=lanes.filter(l=>l.jobs.length>0);
   const cols=active.length?active:lanes;
   const deployed=active.length;
@@ -726,16 +504,16 @@ function DeploymentView({bookings,date,setDate,highlight,onUpdate,onDelete}){
     <div className="board">
       <div className="board-hd">
         <div><h2>Deployment board</h2>
-          <div className="stat">{dayBookings.length} booking{dayBookings.length!==1?"s":""} · {deployed} cleaner{deployed!==1?"s":""} deployed · tap any job to edit</div></div>
+          <div className="stat">{bookings.length} booking{bookings.length!==1?"s":""} · {deployed} cleaner{deployed!==1?"s":""} deployed{loading?" · loading…":""} · tap any job to edit</div></div>
         <div className="board-actions">
-          <button className="btn-x" disabled={dayBookings.length===0} onClick={()=>exportDeployment(dayBookings,date)}>⤓ Export Excel</button>
+          <button className="btn-x" disabled={bookings.length===0} onClick={()=>exportDeployment(bookings,date)}>⤓ Export Excel</button>
           <div className="date-pick"><span className="lab" style={{margin:0}}>Date</span>
             <input type="date" value={date} onChange={e=>setDate(e.target.value)}/></div>
         </div>
       </div>
 
-      {dayBookings.length===0
-        ? <div className="empty-board">No bookings on this date. Add one from <b>New booking</b> and it appears here.</div>
+      {bookings.length===0
+        ? <div className="empty-board">{loading?"Loading…":<>No bookings on this date. Add one from <b>New booking</b>, or pick another date.</>}</div>
         : <>
             <div className="sheet">
               <div className="sheet-title">Deployment — {fmtSheetDate(date)}</div>
@@ -769,15 +547,15 @@ function DeploymentView({bookings,date,setDate,highlight,onUpdate,onDelete}){
             </div>
           </>}
 
-      {editing && <EditBookingModal booking={editing}
-        onSave={(id,changes)=>{onUpdate(id,changes);setEditing(null);}}
+      {editing && <EditBookingModal booking={editing} cleaners={cleaners}
+        onSave={(id,ui)=>{onUpdate(id,ui);setEditing(null);}}
         onDelete={(id)=>{onDelete(id);setEditing(null);}}
         onClose={()=>setEditing(null)}/>}
     </div>
   );
 }
 
-/* ---------------- driver view ---------------- */
+/* ---------- driver view ---------- */
 function DriverView({bookings,date,setDate}){
   const runs=buildDriverRuns(bookings,date);
   return(
@@ -806,8 +584,7 @@ function DriverView({bookings,date,setDate}){
                       {grouped && <span className="grp-badge">GROUPED ×{r.cleaners.length}</span>}</div>
                     <div className="drv-where">{where}</div>
                   </div>
-                  {r.gps &&
-                    <a className="drv-pin" href={mapsLink(r.gps)} target="_blank" rel="noopener noreferrer" title="Navigate in Waze">📍 Waze</a>}
+                  {r.gps && <a className="drv-pin" href={mapsLink(r.gps)} target="_blank" rel="noopener noreferrer" title="Navigate in Waze">📍 Waze</a>}
                 </div>
               );
             })}
@@ -816,7 +593,7 @@ function DriverView({bookings,date,setDate}){
   );
 }
 
-/* ---------------- map modal ---------------- */
+/* ---------- map modal ---------- */
 function MapModal({onPick,onCoords,onClose}){
   const [q,setQ]=useState(""); const [link,setLink]=useState(""); const [err,setErr]=useState("");
   const list=PLACES.filter(p=>(p.name+" "+p.area).toLowerCase().includes(q.toLowerCase()));
@@ -845,14 +622,14 @@ function MapModal({onPick,onCoords,onClose}){
   );
 }
 
-/* ---------------- confirm modal ---------------- */
+/* ---------- confirm modal ---------- */
 function ConfirmModal({data,onSave,onCancel}){
   const d=data;
   return(
     <div className="ovl" onClick={onCancel}>
       <div className="modal" onClick={e=>e.stopPropagation()}>
         <h2>Confirm booking</h2>
-        <p className="msub">Quick check before it deploys.</p>
+        <p className="msub">Quick check before it saves to the database.</p>
         <div className="confirm-grid">
           <div className="ck">Client</div><div className="cv big">{d.name}<div style={{fontWeight:400,fontSize:13,color:"var(--muted)"}} className="num">{d.phone}</div></div>
           <div className="ck">Date</div><div className="cv">{d.date||"—"}</div>
@@ -872,8 +649,8 @@ function ConfirmModal({data,onSave,onCancel}){
   );
 }
 
-/* ---------------- edit booking modal ---------------- */
-function EditBookingModal({booking,onSave,onDelete,onClose}){
+/* ---------- edit booking modal ---------- */
+function EditBookingModal({booking,cleaners,onSave,onDelete,onClose}){
   const b=booking;
   const [name,setName]=useState(b.clientName);
   const [timeText,setTimeText]=useState(`${b.time.start}-${b.time.end}`);
@@ -888,73 +665,55 @@ function EditBookingModal({booking,onSave,onDelete,onClose}){
   const [notes,setNotes]=useState(b.notes||"");
   const [showMap,setShowMap]=useState(false);
   const time=parseTimeRange(timeText);
-  const cleaner=CLEANERS.find(c=>c.id===cleanerId);
-  const valid=name.trim() && time && cleaner;
+  const cleaner=cleaners.find(c=>c.id===cleanerId);
+  const valid=name.trim()&&time&&cleaner;
 
   function save(){
     if(!valid) return;
-    onSave(b.id,{ clientName:name, time, materials, price, code, building, apt, area, gps, notes,
-      cleanerId, cleanerName:cleaner.name });
+    onSave(b.id,{ clientName:name, phone:b.phone, date:b.date, time, materials, price, code,
+      building, apt, area, gps, notes, cleanerId, cleanerName:cleaner.name });
   }
-
   return(
     <div className="ovl" onClick={onClose}>
       <div className="modal" onClick={e=>e.stopPropagation()}>
         <h2>Edit booking</h2>
-        <p className="msub">{b.seed?"Sample booking — changes apply for this session.":"Update any detail and save."}</p>
-
-        <div className="field">
-          <label className="lab">Client name</label>
-          <input value={name} onChange={e=>setName(e.target.value)}/>
-        </div>
-        <div className="field">
-          <label className="lab">Time</label>
+        <p className="msub">Update any detail and save. Changes sync to the database.</p>
+        <div className="field"><label className="lab">Client name</label>
+          <input value={name} onChange={e=>setName(e.target.value)}/></div>
+        <div className="field"><label className="lab">Time</label>
           <input value={timeText} onChange={e=>setTimeText(e.target.value)} placeholder="9-12 or 15:00-17:00"/>
           {time
             ? <div className="time-parsed"><span className="chip num">{time.start}–{time.end}</span><span className="chip dur num">{fmtDur(time.minutes)}</span></div>
-            : <p className="hint err">Enter a valid range like 9-12.</p>}
-        </div>
-        <div className="field">
-          <label className="lab">Cleaner</label>
-          <select value={cleanerId} onChange={e=>setCleanerId(e.target.value)}>
-            {CLEANERS.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </div>
+            : <p className="hint err">Enter a valid range like 9-12.</p>}</div>
+        <div className="field"><label className="lab">Cleaner</label>
+          <select value={cleanerId||""} onChange={e=>setCleanerId(e.target.value)}>
+            {cleaners.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+          </select></div>
         <div className="row2">
-          <div className="field">
-            <label className="lab">Materials</label>
+          <div className="field"><label className="lab">Materials</label>
             <div className="toggle">
               <button className={materials?"on":""} onClick={()=>setMaterials(true)}>With</button>
               <button className={!materials?"on":""} onClick={()=>setMaterials(false)}>Without</button>
-            </div>
-          </div>
-          <div className="field">
-            <label className="lab">Price (AED)</label>
-            <div className="price-in"><input inputMode="numeric" value={price} onChange={e=>setPrice(e.target.value)}/><span className="aed">AED</span></div>
-          </div>
+            </div></div>
+          <div className="field"><label className="lab">Price (AED)</label>
+            <div className="price-in"><input inputMode="numeric" value={price} onChange={e=>setPrice(e.target.value)}/><span className="aed">AED</span></div></div>
         </div>
-        <div className="field">
-          <label className="lab">Job code</label>
-          <select value={code} onChange={e=>setCode(e.target.value)}>
-            <option value="O">O</option><option value="C">C</option>
-          </select>
-        </div>
+        <div className="field"><label className="lab">Payment</label>
+          <div className="toggle">
+            <button className={code==="O"?"on":""} onClick={()=>setCode("O")}>Online (O)</button>
+            <button className={code==="C"?"on":""} onClick={()=>setCode("C")}>Cash (C)</button>
+          </div></div>
         <div className="row2">
-          <div className="field">
-            <label className="lab">Building</label>
-            <input value={building} onChange={e=>setBuilding(e.target.value)}/>
-          </div>
-          <div className="field">
-            <label className="lab">Apt / villa / office</label>
-            <input value={apt} onChange={e=>setApt(e.target.value)}/>
-          </div>
+          <div className="field"><label className="lab">Building</label>
+            <input value={building} onChange={e=>setBuilding(e.target.value)}/></div>
+          <div className="field"><label className="lab">Apt / villa / office</label>
+            <input value={apt} onChange={e=>setApt(e.target.value)}/></div>
         </div>
-        <div className="field">
-          <label className="lab">Area</label>
+        <div className="field"><label className="lab">Area</label>
           <select value={area} onChange={e=>setArea(e.target.value)}>
+            <option value="">—</option>
             {AREAS.map(a=><option key={a} value={a}>{a}</option>)}
-          </select>
-        </div>
+          </select></div>
         <div className="field">
           {gps
             ? <div className="loc-btn set"><div className="loc-set" style={{width:"100%"}}>
@@ -962,18 +721,14 @@ function EditBookingModal({booking,onSave,onDelete,onClose}){
                 <button className="re" onClick={()=>setShowMap(true)}>Change</button></div></div>
             : <button className="loc-btn" onClick={()=>setShowMap(true)}><span>📍 Set location</span><span>›</span></button>}
         </div>
-        <div className="field">
-          <label className="lab">Notes</label>
-          <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={2}/>
-        </div>
-
+        <div className="field"><label className="lab">Notes</label>
+          <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={2}/></div>
         <div className="edit-actions">
-          <button className="del" onClick={()=>onDelete(b.id)}>Delete</button>
+          <button className="del" onClick={()=>{ if(confirm("Cancel this booking? It will be removed from the board (kept in history).")) onDelete(b.id); }}>Delete</button>
           <button className="mb-cancel grow" onClick={onClose}>Cancel</button>
           <button className="mb-ok grow" style={{opacity:valid?1:.5}} disabled={!valid} onClick={save}>Save</button>
         </div>
       </div>
-
       {showMap && <MapModal
         onPick={p=>{setBuilding(p.name);setArea(p.area);setGps({lat:p.lat,lng:p.lng});setShowMap(false);}}
         onCoords={(lat,lng)=>{setArea(detectAreaFromCoords(lat,lng));setGps({lat,lng});setShowMap(false);}}
@@ -983,93 +738,53 @@ function EditBookingModal({booking,onSave,onDelete,onClose}){
 }
 
 /* ============================================================
-   AUTH GATE + SUPABASE CONNECTION  (Step 1 of the DB wiring)
+   AUTH GATE
    ============================================================ */
-const authWrap={minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",
-  background:"#eef1f0",fontFamily:"'Inter',system-ui,sans-serif",padding:"20px"};
-const authCard={background:"#fff",border:"1px solid #d9e0dd",borderRadius:"16px",padding:"28px",
-  width:"100%",maxWidth:"380px",boxShadow:"0 6px 30px rgba(20,32,28,.08)"};
-const authInput={width:"100%",fontSize:"15px",padding:"11px 12px",border:"1.5px solid #d9e0dd",
-  borderRadius:"9px",outline:"none",marginTop:"6px",boxSizing:"border-box"};
-const authBtn={width:"100%",fontFamily:"'Space Grotesk',system-ui,sans-serif",fontWeight:600,
-  fontSize:"15px",padding:"13px",borderRadius:"11px",border:"none",background:"#0e7c5a",
-  color:"#fff",cursor:"pointer",marginTop:"16px"};
+const authWrap={minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#eef1f0",fontFamily:"'Inter',system-ui,sans-serif",padding:"20px"};
+const authCard={background:"#fff",border:"1px solid #d9e0dd",borderRadius:"16px",padding:"28px",width:"100%",maxWidth:"380px",boxShadow:"0 6px 30px rgba(20,32,28,.08)"};
+const authInput={width:"100%",fontSize:"15px",padding:"11px 12px",border:"1.5px solid #d9e0dd",borderRadius:"9px",outline:"none",marginTop:"6px",boxSizing:"border-box"};
+const authBtn={width:"100%",fontFamily:"'Space Grotesk',system-ui,sans-serif",fontWeight:600,fontSize:"15px",padding:"13px",borderRadius:"11px",border:"none",background:"#0e7c5a",color:"#fff",cursor:"pointer",marginTop:"16px"};
 
 function ConfigMissing(){
-  return(
-    <div style={authWrap}><div style={authCard}>
-      <h2 style={{fontFamily:"'Space Grotesk',sans-serif",margin:"0 0 8px"}}>Not connected yet</h2>
-      <p style={{color:"#64726d",fontSize:"14px",lineHeight:1.5,margin:0}}>
-        The app can't find its Supabase settings. Add <b>VITE_SUPABASE_URL</b> and
-        <b> VITE_SUPABASE_ANON_KEY</b> in Vercel → Settings → Environment Variables, then redeploy.
-      </p>
-    </div></div>
-  );
+  return(<div style={authWrap}><div style={authCard}>
+    <h2 style={{fontFamily:"'Space Grotesk',sans-serif",margin:"0 0 8px"}}>Not connected yet</h2>
+    <p style={{color:"#64726d",fontSize:"14px",lineHeight:1.5,margin:0}}>Add <b>VITE_SUPABASE_URL</b> and <b>VITE_SUPABASE_ANON_KEY</b> in Vercel → Settings → Environment Variables, then redeploy.</p>
+  </div></div>);
 }
-
 function Login(){
-  const [email,setEmail]=useState("");
-  const [password,setPassword]=useState("");
-  const [err,setErr]=useState("");
-  const [busy,setBusy]=useState(false);
-  async function submit(e){
-    e.preventDefault(); setErr(""); setBusy(true);
+  const [email,setEmail]=useState(""); const [password,setPassword]=useState("");
+  const [err,setErr]=useState(""); const [busy,setBusy]=useState(false);
+  async function submit(e){ e.preventDefault(); setErr(""); setBusy(true);
     const { error }=await supabase.auth.signInWithPassword({ email:email.trim(), password });
-    setBusy(false);
-    if(error) setErr(error.message);
-  }
-  return(
-    <div style={authWrap}>
-      <form style={authCard} onSubmit={submit}>
-        <div style={{fontFamily:"'Space Grotesk',sans-serif",fontWeight:600,color:"#0e7c5a",fontSize:"13px",letterSpacing:".02em"}}>AR CLEANING · Dispatch</div>
-        <h2 style={{fontFamily:"'Space Grotesk',sans-serif",fontWeight:600,margin:"6px 0 18px",fontSize:"20px"}}>Staff sign in</h2>
-        <label style={{fontSize:"12.5px",fontWeight:500,color:"#64726d"}}>Email
-          <input style={authInput} type="email" value={email} onChange={e=>setEmail(e.target.value)} autoComplete="username" required/>
-        </label>
-        <label style={{fontSize:"12.5px",fontWeight:500,color:"#64726d",display:"block",marginTop:"12px"}}>Password
-          <input style={authInput} type="password" value={password} onChange={e=>setPassword(e.target.value)} autoComplete="current-password" required/>
-        </label>
-        {err && <p style={{color:"#c33a2e",fontSize:"13px",marginTop:"12px",marginBottom:0}}>{err}</p>}
-        <button style={{...authBtn,opacity:busy?.6:1}} disabled={busy} type="submit">{busy?"Signing in…":"Sign in"}</button>
-      </form>
-    </div>
-  );
+    setBusy(false); if(error) setErr(error.message); }
+  return(<div style={authWrap}><form style={authCard} onSubmit={submit}>
+    <div style={{fontFamily:"'Space Grotesk',sans-serif",fontWeight:600,color:"#0e7c5a",fontSize:"13px",letterSpacing:".02em"}}>AR CLEANING · Dispatch</div>
+    <h2 style={{fontFamily:"'Space Grotesk',sans-serif",fontWeight:600,margin:"6px 0 18px",fontSize:"20px"}}>Staff sign in</h2>
+    <label style={{fontSize:"12.5px",fontWeight:500,color:"#64726d"}}>Email
+      <input style={authInput} type="email" value={email} onChange={e=>setEmail(e.target.value)} autoComplete="username" required/></label>
+    <label style={{fontSize:"12.5px",fontWeight:500,color:"#64726d",display:"block",marginTop:"12px"}}>Password
+      <input style={authInput} type="password" value={password} onChange={e=>setPassword(e.target.value)} autoComplete="current-password" required/></label>
+    {err && <p style={{color:"#c33a2e",fontSize:"13px",marginTop:"12px",marginBottom:0}}>{err}</p>}
+    <button style={{...authBtn,opacity:busy?.6:1}} disabled={busy} type="submit">{busy?"Signing in…":"Sign in"}</button>
+  </form></div>);
 }
-
 function AuthBar({email}){
-  const [status,setStatus]=useState("checking");
-  const [count,setCount]=useState(null);
-  useEffect(()=>{
-    let on=true;
-    supabase.from("cleaners").select("id",{count:"exact",head:true})
-      .then(({count,error})=>{ if(!on)return; if(error){setStatus("err:"+error.message);} else {setStatus("ok");setCount(count);} });
-    return ()=>{on=false;};
-  },[]);
-  const bar={display:"flex",alignItems:"center",gap:"12px",flexWrap:"wrap",
-    padding:"8px 18px",background:"#14201c",color:"#cfe0d9",fontFamily:"'Inter',sans-serif",fontSize:"12.5px"};
-  const dot=(c)=>({width:"8px",height:"8px",borderRadius:"50%",background:c,display:"inline-block"});
-  return(
-    <div style={bar}>
-      {status==="ok"
-        ? <span style={{display:"inline-flex",alignItems:"center",gap:"7px"}}><span style={dot("#3ad29f")}/>Supabase connected · {count} cleaners loaded</span>
-        : status==="checking"
-          ? <span style={{display:"inline-flex",alignItems:"center",gap:"7px"}}><span style={dot("#b7791f")}/>Connecting…</span>
-          : <span style={{display:"inline-flex",alignItems:"center",gap:"7px",color:"#f2b8b2"}}><span style={dot("#c33a2e")}/>DB error: {status.slice(4)}</span>}
-      <span style={{marginLeft:"auto",opacity:.8}}>{email}</span>
-      <button onClick={()=>supabase.auth.signOut()} style={{background:"none",border:"1px solid #3a4a44",color:"#cfe0d9",borderRadius:"7px",padding:"4px 10px",cursor:"pointer",fontSize:"12px"}}>Sign out</button>
-    </div>
-  );
+  const bar={display:"flex",alignItems:"center",gap:"12px",flexWrap:"wrap",padding:"8px 18px",background:"#14201c",color:"#cfe0d9",fontFamily:"'Inter',sans-serif",fontSize:"12.5px"};
+  const dot={width:"8px",height:"8px",borderRadius:"50%",background:"#3ad29f",display:"inline-block"};
+  return(<div style={bar}>
+    <span style={{display:"inline-flex",alignItems:"center",gap:"7px"}}><span style={dot}/>Live · Supabase</span>
+    <span style={{marginLeft:"auto",opacity:.8}}>{email}</span>
+    <button onClick={()=>supabase.auth.signOut()} style={{background:"none",border:"1px solid #3a4a44",color:"#cfe0d9",borderRadius:"7px",padding:"4px 10px",cursor:"pointer",fontSize:"12px"}}>Sign out</button>
+  </div>);
 }
-
 export default function App(){
-  const [session,setSession]=useState(undefined); // undefined = still loading
+  const [session,setSession]=useState(undefined);
   useEffect(()=>{
     if(!supabase){ setSession(null); return; }
     supabase.auth.getSession().then(({data})=>setSession(data.session));
     const { data:sub }=supabase.auth.onAuthStateChange((_e,s)=>setSession(s));
     return ()=>sub.subscription.unsubscribe();
   },[]);
-
   if(!supabase) return <ConfigMissing/>;
   if(session===undefined) return <div style={authWrap}><div style={{color:"#64726d"}}>Loading…</div></div>;
   if(!session) return <Login/>;
