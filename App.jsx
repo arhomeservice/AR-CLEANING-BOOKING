@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect } from "react";
 import * as XLSX from "xlsx";
+import { supabase } from "./supabaseClient.js";
 
 /* ============================================================
    AR Cleaning — Dispatch prototype (mock data, no backend)
@@ -372,7 +373,7 @@ function buildDriverRuns(bookings,date){
   });
   return runs.sort((a,b)=>a.min-b.min);
 }
-const mapsLink=(gps)=>gps?`https://www.google.com/maps/search/?api=1&query=${gps.lat},${gps.lng}`:"";
+const mapsLink=(gps)=>gps?`https://waze.com/ul?ll=${gps.lat},${gps.lng}&navigate=yes`:"";
 
 /* ---------------- Excel export ---------------- */
 function exportDeployment(dayBookings,date){
@@ -383,7 +384,7 @@ function exportDeployment(dayBookings,date){
       Materials:b.materials?"W/m":"", Price:b.price??"", Code:b.code||"", Notes:b.notes||"",
       "Map link":mapsLink(b.gps)}));
   const ws=XLSX.utils.json_to_sheet(rows);
-  rows.forEach((r,i)=>{ if(r["Map link"]){ const a=XLSX.utils.encode_cell({c:12,r:i+1}); if(ws[a]) ws[a].l={Target:r["Map link"],Tooltip:"Open in Maps"}; }});
+  rows.forEach((r,i)=>{ if(r["Map link"]){ const a=XLSX.utils.encode_cell({c:12,r:i+1}); if(ws[a]) ws[a].l={Target:r["Map link"],Tooltip:"Open in Waze"}; }});
   ws["!cols"]=[{wch:10},{wch:20},{wch:20},{wch:9},{wch:14},{wch:7},{wch:7},{wch:8},{wch:9},{wch:8},{wch:6},{wch:24},{wch:16}];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Deployment");
   XLSX.writeFile(wb,`Deployment_${date}.xlsx`);
@@ -392,7 +393,7 @@ function exportDriver(runs,date){
   const rows=runs.map(r=>({Time:minToStr(r.min), Type:r.type, Cleaners:r.cleaners.join(" + "),
     Location:r.buildings.length?r.buildings.join(" / "):r.area, Area:r.area, "Map link":mapsLink(r.gps)}));
   const ws=XLSX.utils.json_to_sheet(rows);
-  rows.forEach((r,i)=>{ if(r["Map link"]){ const a=XLSX.utils.encode_cell({c:5,r:i+1}); if(ws[a]) ws[a].l={Target:r["Map link"],Tooltip:"Open in Maps"}; }});
+  rows.forEach((r,i)=>{ if(r["Map link"]){ const a=XLSX.utils.encode_cell({c:5,r:i+1}); if(ws[a]) ws[a].l={Target:r["Map link"],Tooltip:"Open in Waze"}; }});
   ws["!cols"]=[{wch:8},{wch:9},{wch:22},{wch:26},{wch:14},{wch:16}];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Driver schedule");
   XLSX.writeFile(wb,`Driver_${date}.xlsx`);
@@ -412,7 +413,7 @@ function seedBookings(){
 }
 
 /* ============================================================ */
-export default function App(){
+function Dispatch(){
   const [bookings,setBookings]=useState(seedBookings);
   const [view,setView]=useState("new");
   const [boardDate,setBoardDate]=useState(TODAY);
@@ -783,7 +784,7 @@ function DriverView({bookings,date,setDate}){
     <div className="board">
       <div className="board-hd">
         <div><h2>Driver schedule</h2>
-          <div className="stat">{runs.length} event{runs.length!==1?"s":""} · drop 30 min before start, collect at end · tap 📍 to navigate</div></div>
+          <div className="stat">{runs.length} event{runs.length!==1?"s":""} · drop 30 min before start, collect at end · tap Waze to navigate</div></div>
         <div className="board-actions">
           <button className="btn-x" disabled={runs.length===0} onClick={()=>exportDriver(runs,date)}>⤓ Export Excel</button>
           <div className="date-pick"><span className="lab" style={{margin:0}}>Date</span>
@@ -806,7 +807,7 @@ function DriverView({bookings,date,setDate}){
                     <div className="drv-where">{where}</div>
                   </div>
                   {r.gps &&
-                    <a className="drv-pin" href={mapsLink(r.gps)} target="_blank" rel="noopener noreferrer" title="Open in Google Maps">📍 Open</a>}
+                    <a className="drv-pin" href={mapsLink(r.gps)} target="_blank" rel="noopener noreferrer" title="Navigate in Waze">📍 Waze</a>}
                 </div>
               );
             })}
@@ -979,4 +980,98 @@ function EditBookingModal({booking,onSave,onDelete,onClose}){
         onClose={()=>setShowMap(false)}/>}
     </div>
   );
+}
+
+/* ============================================================
+   AUTH GATE + SUPABASE CONNECTION  (Step 1 of the DB wiring)
+   ============================================================ */
+const authWrap={minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",
+  background:"#eef1f0",fontFamily:"'Inter',system-ui,sans-serif",padding:"20px"};
+const authCard={background:"#fff",border:"1px solid #d9e0dd",borderRadius:"16px",padding:"28px",
+  width:"100%",maxWidth:"380px",boxShadow:"0 6px 30px rgba(20,32,28,.08)"};
+const authInput={width:"100%",fontSize:"15px",padding:"11px 12px",border:"1.5px solid #d9e0dd",
+  borderRadius:"9px",outline:"none",marginTop:"6px",boxSizing:"border-box"};
+const authBtn={width:"100%",fontFamily:"'Space Grotesk',system-ui,sans-serif",fontWeight:600,
+  fontSize:"15px",padding:"13px",borderRadius:"11px",border:"none",background:"#0e7c5a",
+  color:"#fff",cursor:"pointer",marginTop:"16px"};
+
+function ConfigMissing(){
+  return(
+    <div style={authWrap}><div style={authCard}>
+      <h2 style={{fontFamily:"'Space Grotesk',sans-serif",margin:"0 0 8px"}}>Not connected yet</h2>
+      <p style={{color:"#64726d",fontSize:"14px",lineHeight:1.5,margin:0}}>
+        The app can't find its Supabase settings. Add <b>VITE_SUPABASE_URL</b> and
+        <b> VITE_SUPABASE_ANON_KEY</b> in Vercel → Settings → Environment Variables, then redeploy.
+      </p>
+    </div></div>
+  );
+}
+
+function Login(){
+  const [email,setEmail]=useState("");
+  const [password,setPassword]=useState("");
+  const [err,setErr]=useState("");
+  const [busy,setBusy]=useState(false);
+  async function submit(e){
+    e.preventDefault(); setErr(""); setBusy(true);
+    const { error }=await supabase.auth.signInWithPassword({ email:email.trim(), password });
+    setBusy(false);
+    if(error) setErr(error.message);
+  }
+  return(
+    <div style={authWrap}>
+      <form style={authCard} onSubmit={submit}>
+        <div style={{fontFamily:"'Space Grotesk',sans-serif",fontWeight:600,color:"#0e7c5a",fontSize:"13px",letterSpacing:".02em"}}>AR CLEANING · Dispatch</div>
+        <h2 style={{fontFamily:"'Space Grotesk',sans-serif",fontWeight:600,margin:"6px 0 18px",fontSize:"20px"}}>Staff sign in</h2>
+        <label style={{fontSize:"12.5px",fontWeight:500,color:"#64726d"}}>Email
+          <input style={authInput} type="email" value={email} onChange={e=>setEmail(e.target.value)} autoComplete="username" required/>
+        </label>
+        <label style={{fontSize:"12.5px",fontWeight:500,color:"#64726d",display:"block",marginTop:"12px"}}>Password
+          <input style={authInput} type="password" value={password} onChange={e=>setPassword(e.target.value)} autoComplete="current-password" required/>
+        </label>
+        {err && <p style={{color:"#c33a2e",fontSize:"13px",marginTop:"12px",marginBottom:0}}>{err}</p>}
+        <button style={{...authBtn,opacity:busy?.6:1}} disabled={busy} type="submit">{busy?"Signing in…":"Sign in"}</button>
+      </form>
+    </div>
+  );
+}
+
+function AuthBar({email}){
+  const [status,setStatus]=useState("checking");
+  const [count,setCount]=useState(null);
+  useEffect(()=>{
+    let on=true;
+    supabase.from("cleaners").select("id",{count:"exact",head:true})
+      .then(({count,error})=>{ if(!on)return; if(error){setStatus("err:"+error.message);} else {setStatus("ok");setCount(count);} });
+    return ()=>{on=false;};
+  },[]);
+  const bar={display:"flex",alignItems:"center",gap:"12px",flexWrap:"wrap",
+    padding:"8px 18px",background:"#14201c",color:"#cfe0d9",fontFamily:"'Inter',sans-serif",fontSize:"12.5px"};
+  const dot=(c)=>({width:"8px",height:"8px",borderRadius:"50%",background:c,display:"inline-block"});
+  return(
+    <div style={bar}>
+      {status==="ok"
+        ? <span style={{display:"inline-flex",alignItems:"center",gap:"7px"}}><span style={dot("#3ad29f")}/>Supabase connected · {count} cleaners loaded</span>
+        : status==="checking"
+          ? <span style={{display:"inline-flex",alignItems:"center",gap:"7px"}}><span style={dot("#b7791f")}/>Connecting…</span>
+          : <span style={{display:"inline-flex",alignItems:"center",gap:"7px",color:"#f2b8b2"}}><span style={dot("#c33a2e")}/>DB error: {status.slice(4)}</span>}
+      <span style={{marginLeft:"auto",opacity:.8}}>{email}</span>
+      <button onClick={()=>supabase.auth.signOut()} style={{background:"none",border:"1px solid #3a4a44",color:"#cfe0d9",borderRadius:"7px",padding:"4px 10px",cursor:"pointer",fontSize:"12px"}}>Sign out</button>
+    </div>
+  );
+}
+
+export default function App(){
+  const [session,setSession]=useState(undefined); // undefined = still loading
+  useEffect(()=>{
+    if(!supabase){ setSession(null); return; }
+    supabase.auth.getSession().then(({data})=>setSession(data.session));
+    const { data:sub }=supabase.auth.onAuthStateChange((_e,s)=>setSession(s));
+    return ()=>sub.subscription.unsubscribe();
+  },[]);
+
+  if(!supabase) return <ConfigMissing/>;
+  if(session===undefined) return <div style={authWrap}><div style={{color:"#64726d"}}>Loading…</div></div>;
+  if(!session) return <Login/>;
+  return <><AuthBar email={session.user?.email}/><Dispatch/></>;
 }
