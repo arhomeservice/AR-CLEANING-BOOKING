@@ -47,10 +47,7 @@ function toUi(r) {
 
 const SELECT = `
   id, booking_date, start_time, end_time, materials_required, price, service_type, status, notes,
-  client_id, location_id, assigned_cleaner_id,
-  client:clients ( id, full_name, mobile_number ),
-  location:locations ( building_name, unit_number, area, latitude, longitude ),
-  cleaner:cleaners ( name )
+  client_id, location_id, assigned_cleaner_id
 `
 
 /* ---------- reference data ---------- */
@@ -60,12 +57,32 @@ export async function getCleaners() {
   return data
 }
 
-/* ---------- bookings for a date ---------- */
+/* ---------- bookings for a date (robust: base rows first, then attach names) ---------- */
 export async function getBookingsForDate(date) {
-  const { data, error } = await supabase.from('bookings').select(SELECT)
+  const { data: rows, error } = await supabase.from('bookings').select(SELECT)
     .eq('booking_date', date).neq('status', 'CANCELLED').order('start_time')
   if (error) throw error
-  return data.map(toUi)
+  if (!rows || rows.length === 0) return []
+
+  const clientIds = [...new Set(rows.map(r => r.client_id).filter(Boolean))]
+  const locIds    = [...new Set(rows.map(r => r.location_id).filter(Boolean))]
+  const cleanerIds= [...new Set(rows.map(r => r.assigned_cleaner_id).filter(Boolean))]
+
+  const [clients, locations, cleaners] = await Promise.all([
+    clientIds.length  ? supabase.from('clients').select('id, full_name, mobile_number').in('id', clientIds) : { data: [] },
+    locIds.length     ? supabase.from('locations').select('id, building_name, unit_number, area, latitude, longitude').in('id', locIds) : { data: [] },
+    cleanerIds.length ? supabase.from('cleaners').select('id, name').in('id', cleanerIds) : { data: [] },
+  ])
+  const cMap = new Map((clients.data || []).map(c => [c.id, c]))
+  const lMap = new Map((locations.data || []).map(l => [l.id, l]))
+  const kMap = new Map((cleaners.data || []).map(k => [k.id, k]))
+
+  return rows.map(r => toUi({
+    ...r,
+    client: cMap.get(r.client_id),
+    location: lMap.get(r.location_id),
+    cleaner: kMap.get(r.assigned_cleaner_id),
+  }))
 }
 
 /* ---------- client lookup by phone ---------- */
@@ -73,13 +90,12 @@ export async function findClientByPhone(phone) {
   const p = normalizePhone(phone)
   if (!p) return null
   const { data, error } = await supabase.from('clients')
-    .select(`id, full_name, mobile_number,
-      prefs:client_preferences ( booking_count, last_booking_date, preferred_day,
-        preferred_start_time, preferred_end_time, preferred_cleaner_id, preferred_location_id )`)
-    .eq('mobile_number', p).maybeSingle()
+    .select('id, full_name, mobile_number').eq('mobile_number', p).maybeSingle()
   if (error) throw error
   if (!data) return null
-  const pr = Array.isArray(data.prefs) ? data.prefs[0] : data.prefs
+  const { data: pr } = await supabase.from('client_preferences')
+    .select('booking_count, last_booking_date, preferred_day, preferred_start_time, preferred_end_time, preferred_cleaner_id, preferred_location_id')
+    .eq('client_id', data.id).maybeSingle()
   return { id: data.id, name: data.full_name, phone: data.mobile_number, prefs: pr || null }
 }
 
